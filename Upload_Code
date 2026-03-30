@@ -1,0 +1,30 @@
+#!/bin/bash
+
+# Usage: ./Upload_Code [airhaum-vol|airhaum-test|all]
+
+#BINARY=${1:-all}  # Par défaut : compile tout
+BINARY=${1:-airhaum-test}  # Par défaut : compile airhaum-test
+TARGET="armv7-unknown-linux-gnueabihf"
+REMOTE="airhaum@orangepizero.local"
+
+case $BINARY in
+    "airhaum-vol")
+        cargo build --release --target=$TARGET --bin airhaum-vol
+        scp target/$TARGET/release/airhaum-vol $REMOTE:~/
+        ;;
+    "airhaum-test")
+        cargo build --release --target=$TARGET --bin airhaum-test
+        scp target/$TARGET/release/airhaum-test $REMOTE:~/
+        ;;
+    "all")
+        cargo build --release --target=$TARGET
+        scp target/$TARGET/release/airhaum-vol $REMOTE:~/
+        scp target/$TARGET/release/airhaum-test $REMOTE:~/
+        ;;
+    *)
+        echo "Usage: $0 [airhaum-vol|airhaum-test|all]"
+        exit 1
+        ;;
+esac
+
+echo "fin"
