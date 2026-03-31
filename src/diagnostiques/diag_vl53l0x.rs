@@ -140,6 +140,86 @@ pub fn test_mesures_continues<I2C: BusI2c>(i2c: I2C, nombre_mesures: usize) -> R
     Ok(())
 }
 
+
+
+/// Test de fréquence d'échantillonnage du VL53L0X
+///
+/// Mesure la cadence *réelle* du capteur en lançant `n_mesures` lectures
+/// consécutives sans pause forcée. Différent de `test_mesures_continues`
+/// qui impose un `sleep(100ms)` et ne mesure pas la fréquence intrinsèque.
+///
+/// # Fréquence attendue
+///
+/// Le VL53L0X en mode single-shot met ~33 ms par mesure → ~30 Hz théorique.
+/// En pratique, l'overhead I²C ramène souvent à 20–25 Hz.
+///
+/// # Exemple de sortie
+///
+/// ```text
+/// VL53L0X: 22.4 Hz (dt = 44.6 ms), jitter ±3.1 ms
+/// ```
+pub fn test_frequence<I2C: BusI2c>(i2c: I2C, n_mesures: usize) -> crate::types::Result<crate::types::mesure_frequence::MesureFrequence> {
+    use crate::types::mesure_frequence;
+
+    const FREQUENCE_CIBLE_HZ: f32 = 25.0;
+
+    println!("\n=== Test de fréquence VL53L0X ===");
+    println!("Nombre de mesures : {}", n_mesures);
+    println!("Fréquence nominale cible : {:.1} Hz\n", FREQUENCE_CIBLE_HZ);
+
+    let mut vl53 = Vl53l0x::nouveau(i2c, ADRESSE_VL53L0X);
+
+    print!("Initialisation... ");
+    vl53.initialiser()?;
+    println!("✓");
+
+    let mut intervalles_us: Vec<u64> = Vec::with_capacity(n_mesures);
+    let mut n_erreurs = 0usize;
+    let mut dernier_instant = std::time::Instant::now();
+    let mut premiere_mesure = true;
+
+    println!("Acquisition en cours (sans pause forcée)...");
+
+    for i in 0..n_mesures {
+        let maintenant = std::time::Instant::now();
+
+        match vl53.mesurer_distance() {
+            Ok(_) => {
+                if !premiere_mesure {
+                    intervalles_us.push(dernier_instant.elapsed().as_micros() as u64);
+                }
+                premiere_mesure = false;
+                dernier_instant = maintenant;
+            }
+            Err(e) => {
+                n_erreurs += 1;
+                if i < 5 || i % 20 == 0 {
+                    eprintln!("  Erreur #{}: {:?}", i, e);
+                }
+                premiere_mesure = true;
+            }
+        }
+    }
+
+    let stats = mesure_frequence::calculer_stats("VL53L0X", &intervalles_us, n_erreurs);
+    stats.afficher_resume();
+
+    if stats.est_dans_tolerance(FREQUENCE_CIBLE_HZ, 40.0) {
+        println!("  ✓ Fréquence dans la tolérance ±40% par rapport à {:.1} Hz", FREQUENCE_CIBLE_HZ);
+    } else {
+        println!(
+            "  ⚠ Fréquence hors tolérance : {:.2} Hz vs {:.1} Hz attendus",
+            stats.hz_moyen, FREQUENCE_CIBLE_HZ
+        );
+    }
+
+    Ok(stats)
+}
+
+
+
+
+
 /// Diagnostic complet du VL53L0X
 pub fn diagnostic_complet<I2C: BusI2c>(i2c: I2C) -> Result<()> {
     println!("\n╔════════════════════════════════════════╗");

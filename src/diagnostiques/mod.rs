@@ -3,6 +3,9 @@
 pub mod diag_bmp280;     // Import du module (fichier) 
 pub mod diag_vl53l0x; 
 pub mod diag_mpu9250;
+pub mod diag_taches_capteurs;
+
+
 
 //mod lora;
 // etc.

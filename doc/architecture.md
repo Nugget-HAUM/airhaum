@@ -1,69 +1,42 @@
 _______________________
 Arborescence détaillée: 
 
+A éditer avec : tree -I "target"
+
+
 
 airhaum/
 
 ├── Cargo.lock                      # ok
 ├── Cargo.toml                      # ok
-├── lisezmoi.md                     # ok
+├── readme.md                       # ok
 ├── doc/                            # ok
-│   ├── architecture.md             # ok:Architecture du projet 
-│   ├── gestion_du_temps.md         # ok:Doc de la gestion du temps
-│   ├── initialisation.md           # ok:Doc initialisation et calibration capteurs
-│   ├── projet.md                   # ok:Doc générale du projet
+│   ├── architecture.md             # ok: Architecture du projet 
+│   ├── gestion_du_temps.md         # ok: Doc de la gestion du temps
+│   ├── initialisation.md           # ok: Doc initialisation et calibration capteurs
+│   ├── projet.md                   # ok: Doc générale du projet
 │    
 ├── config/                         # A FAIRE
 │   ├── default.toml                # A FAIRE Configuration par défaut
 │   ├── calibration.toml            # A FAIRE Données de calibration
 │   
 ├── src/                            # ok
-│   ├── lib.rs                      # ok:Export des modules publiques
+│   ├── lib.rs                      # ok: Export des modules publiques
 │   │
-│   ├── bin/                        # ok:Liste des binaires
-│   │   ├── airhaum-vol.rs          # ok:Binaire de vol autonome
-│   │   ├── airhaum-test.rs         # ok:Console de test / diagnostic
+│   ├── bin/                        # ok: Liste des binaires
+│   │   ├── airhaum-vol.rs          # ok: Binaire de vol autonome
+│   │   ├── airhaum-test.rs         # ok: Console de test / diagnostic
 │   │   └── airhaum-debug.rs        # A FAIRE Binaire phase de développement
 │   │
-│   ├── diagnostiques/              # ok:Fonctions de diagnostic matériel
+│   ├── diagnostiques/              # ok: Fonctions de diagnostic matériel
 │   │   ├── mod.rs                  # ok
-│   │   ├── diag_bmp280.rs          # ok
+│   │   ├── diag_bmp280.rs          # ok: Diagnostique du barometre
+│   │   ├── diag_mpu9250.rs         # ok: Diagnostique de la centrale intertialle
 │   │   ├── diag_gps.rs             # A FAIRE
-│   │   └── diag_vl53lox.rs         # ok
+│   │   └── diag_vl53lox.rs         # ok: Diagnostique du télémètre
 │   │
-│   ├── types/                      # ok:Types fondamentaux (pas de dépendances)
-│   │   ├── mod.rs                  # ok
-│   │   ├── etat_capteur.rs         # ok:Machine a état des capteurs
-│   │   ├── messages.rs             # ok:SystemMessage, SensorData, etc.
-│   │   ├── geometrie.rs            # ok:Vector3, Quaternion, etc.
-│   │   ├── constantes.rs           # ok:Constantes physiques.
-│   │   └── erreurs.rs              # ok:Erreurs personnalisées
 │   │
-│   ├── utilitaires/                # A FAIRE:Utilitaires (pas de dépendances métier)
-│   │   ├── mod.rs                  # A FAIRE:
-│   │   ├── maths.rs                # A FAIRE:Fonctions math courantes
-│   │   └── filtres.rs              # A FAIRE:Filtres passe-bas, etc.
-│   │
-│   ├── interfaces/                 # ok:Traits (dépend uniquement de types/)
-│   │   ├── mod.rs                  # ok
-│   │   ├── imu.rs                  # A FAIRE:Trait CentraleInertielle
-│   │   ├── gps.rs                  # A FAIRE:Trait Gps
-│   │   ├── barometre.rs            # ok:Trait barometre
-│   │   ├── telemetre.rs            # ok:Trait télémètre
-│   │   ├── vision.rs               # A FAIRE:Trait interface système de vision
-│   │   ├── estimateur.rs           # A FAIRE:Trait estimateur d’état de l'appareil 
-│   │   ├── controleur.rs           # A FAIRE:Trait consignes de vol, moteur 
-│   │   └── actionneurs.rs          # A FAIRE:Trait dispositifs qui agissent physiquement
-│   │
-│   ├── hal/                        # ok:Couche 1A: Hardware Abstraction Layer (ne doit jamais connaître les drivers)
-│   │   ├── mod.rs                  # ok
-│   │   ├── i2c.rs                  # ok:Trait BusI2c (abstraction) + Mock pour tests
-│   │   ├── i2c_linux.rs            # ok:Implémentation spécifique à linux de BusI2c (/dev/i2c-X)
-│   │   ├── uart.rs                 # A FAIRE:Abstraction des communications série.
-│   │   ├── spi.rs                  # A FAIRE:Abstraction du bus SPI
-│   │   └── gpio.rs                 # A FAIRE:Accès générique aux broches GPIO.
-│   │
-│   ├── drivers/                    # ok:Couche 1B: Drivers spécifiques (dépend de hal/ et interfaces/)
+│   ├── drivers/                    # ok: Couche 1B: Drivers spécifiques (dépend de hal/ et interfaces/)
 │   │   ├── mod.rs                  # ok
 │   │   ├── imu/                    # ok
 │   │   │   ├── mod.rs              # ok
@@ -87,6 +60,24 @@ airhaum/
 │   │   ├── controleur_servo.rs     # A FAIRE Communication Arduino
 │   │   └── vision.rs               # A FAIRE Trait pour future ESP32-CAM
 │   │
+│   ├── hal/                        # ok: Couche 1A: Hardware Abstraction Layer (ne doit jamais connaître les drivers)
+│   │   ├── mod.rs                  # ok
+│   │   ├── i2c.rs                  # ok: Trait BusI2c (abstraction) + Mock pour tests
+│   │   ├── i2c_linux.rs            # ok: Implémentation spécifique à linux de BusI2c (/dev/i2c-X)
+│   │   ├── uart.rs                 # A FAIRE:Abstraction des communications série.
+│   │   ├── spi.rs                  # A FAIRE:Abstraction du bus SPI
+│   │   └── gpio.rs                 # A FAIRE:Accès générique aux broches GPIO.
+│   │
+│   ├── interfaces/                 # ok: Traits (dépend uniquement de types/)
+│   │   ├── mod.rs                  # ok
+│   │   ├── imu.rs                  # ok: Trait CentraleInertielle
+│   │   ├── gps.rs                  # A FAIRE:Trait Gps
+│   │   ├── barometre.rs            # ok:Trait barometre
+│   │   ├── telemetre.rs            # ok:Trait télémètre
+│   │   ├── vision.rs               # A FAIRE:Trait interface système de vision
+│   │   ├── estimateur.rs           # A FAIRE:Trait estimateur d’état de l'appareil 
+│   │   ├── controleur.rs           # A FAIRE:Trait consignes de vol, moteur 
+│   │   └── actionneurs.rs          # A FAIRE:Trait dispositifs qui agissent physiquement
 │   ├── capteurs/                   # A FAIRE Couche 2: Fusion capteurs bas niveau (Pré traitement capteurs)
 │   │   ├── mod.rs                  # A FAIRE
 │   │   ├── traitement_imu.rs       # A FAIRE
@@ -144,6 +135,19 @@ airhaum/
 │   │   ├── configuration.rs        # A FAIRE Chargement/sauvegarde config
 │   │   ├── temps.rs                # A FAIRE Gestion temps système, timestamps
 │   │   └── energie.rs              # A FAIRE Surveillance batterie
+│   │
+│   ├── types/                      # ok:Types fondamentaux (pas de dépendances)
+│   │   ├── mod.rs                  # ok
+│   │   ├── etat_capteur.rs         # ok:Machine a état des capteurs
+│   │   ├── messages.rs             # ok:SystemMessage, SensorData, etc.
+│   │   ├── geometrie.rs            # ok:Vector3, Quaternion, etc.
+│   │   ├── constantes.rs           # ok:Constantes physiques.
+│   │   └── erreurs.rs              # ok:Erreurs personnalisées
+│   │
+│   ├── utilitaires/                # A FAIRE:Utilitaires (pas de dépendances métier)
+│   │   ├── mod.rs                  # A FAIRE:
+│   │   ├── maths.rs                # A FAIRE:Fonctions math courantes
+│   │   └── filtres.rs              # A FAIRE:Filtres passe-bas, etc.
 │   │
 │   └── taches/                     # A FAIRE Taches async (exécution)
 │       ├── mod.rs                  # A FAIRE 

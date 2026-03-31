@@ -69,6 +69,9 @@ Objectif :
 | Mission            | 5 – 10 Hz       | ±50 %     |
 | Communication      | 10 – 50 Hz      | ±50 %     |
 
+Les fréquences reelles sont suivient au cours du fonctionnement 
+et font l'objet d'alertes en cas de dérive. 
+
 ---
 
 ## Priorités logiques
