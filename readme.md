@@ -1,5 +1,7 @@
 # AirHaum II
 
+![Statut du projet](https://img.shields.io/badge/statut-en_cours_d_élaboration-orange)
+
 ## Présentation
 
 **AirHaum II** est un projet de pilote automatique expérimental visant à rendre un avion radiocommandé partiellement ou totalement autonome.
