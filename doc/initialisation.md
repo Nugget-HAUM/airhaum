@@ -1,3 +1,6 @@
+// doc/initialisation.md 
+
+
 # Initialisation des capteurs – AirHaum II
 
 ## Principe
@@ -19,8 +22,11 @@ Au démarrage du programme, chaque driver applique la logique suivante :
 2. **Choix automatique de l’action**
    - si une configuration valide est détectée :
      → reprise rapide (purge des buffers, resynchronisation)
+     objectif en cas de crash logiciel en vol pouvoir relancer le programme 
+     dans un délai bref et éviter un crash de l'avion
    - si l’état est incohérent :
-     → reset matériel puis configuration complète
+     → mise en état dégadé du capteur qui peut tourner mais empechera d'armer
+     l'avion. Cas typique au sol en attende d'une calibratoin complète 
 
 Cette décision est **entièrement locale au driver**.
 
@@ -30,13 +36,14 @@ Cette décision est **entièrement locale au driver**.
 
 **Calibration des capteurs:**
  - Quand elle est nécessaire, se fait au sol, pré-vol.
- - Elle est stockée en flash avec timestamp.
+ - Elle est stockée en flash avec timestamp unix en seconde.
  - Validité: jusqu'au prochain désarmement, délai spécifique
    au capteur ou mise hors tension
+
 **Condition d'armement** : tous capteurs en état Opérationnel avec calibrations
  valides.
 **Redémarrage en vol** : réutilisation des calibrations stockées. Aucune
- recalibration en vol.
+ recalibration en vol, pas de calibration automatique au démarrage.
 
 ---
 
@@ -52,8 +59,17 @@ Chaque capteur évolue selon les états suivants :
 
 Le système consomme uniquement l’état exposé par le driver, sans supposition implicite.
 
+
+Inconnu → NonConfiguré → Configuré → Opérationnel
+   ↑           ↓             ↓            ↓
+   └──────── Dégradé ←───────┘────────────┘
+
+
 **Dégradation** : tout état peut basculer vers Dégradé, qui force un 
 retour à Inconnu pour réinitialisation complète.
+
+Le passage d'un ou plusieurs capteurs en mode dégradé sera logé et remonté au controle
+de mission pour décision. 
 
 ---
 

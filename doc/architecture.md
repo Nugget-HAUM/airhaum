@@ -149,9 +149,9 @@ airhaum/
 │   │   ├── maths.rs                # A FAIRE:Fonctions math courantes
 │   │   └── filtres.rs              # A FAIRE:Filtres passe-bas, etc.
 │   │
-│   └── taches/                     # A FAIRE Taches async (exécution)
-│       ├── mod.rs                  # A FAIRE 
-│       ├── taches_capteurs.rs      # A FAIRE 
+│   └── taches/                     # ok: Taches async (exécution)
+│       ├── mod.rs                  # ok  
+│       ├── taches_capteurs.rs      # ok  
 │       ├── taches_estimation.rs    # A FAIRE
 │       ├── taches_controle.rs      # A FAIRE
 │       ├── taches_mission.rs       # A FAIRE

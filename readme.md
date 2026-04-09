@@ -68,6 +68,7 @@ Le projet est structuré en couches clairement séparées :
 
 Chaque couche dépend uniquement des couches inférieures, selon le principe d'inversion de dépendances.
 
+
 ---
 
 ## Philosophie de conception
@@ -77,6 +78,30 @@ Chaque couche dépend uniquement des couches inférieures, selon le principe d'i
 - Code testable avec mocks matériels
 - Gestion explicite des erreurs
 - Priorité absolue à la sûreté sur la mission
+
+
+---
+
+## Philosophie de developpement
+
+
+Le développement s'appuie sur `airhaum-test` comme véhicule d'intégration progressive.
+À chaque itération, le programme parcourt une étape de plus de la séquence de vol :
+
+```
+[1] Initialisation matérielle   (bus, configuration)
+[2] Vérification des capteurs   (présence, sanité)
+[3] Calibration                 (références, offsets)
+[4] Prêt à armer                (vérifications pré-vol)
+[5] Armé                        (actionneurs actifs)
+[6] Prêt à rouler               (déplacement sol)
+[7] Vol autonome
+[8] Atterrissage / désarmement
+```
+
+Quand `airhaum-test` atteint l'étape [8], il est fonctionnellement équivalent à `airhaum-vol`.
+Les composants absents (GPS, LoRa…) sont intégrés au fil des itérations sans bloquer les étapes précédentes.
+
 
 ---
 
