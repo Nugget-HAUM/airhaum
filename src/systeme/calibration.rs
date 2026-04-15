@@ -112,8 +112,8 @@ impl GestionnaireCalibration {
     ///
     /// # Arguments
     ///
-    /// * `chemin_base` - Répertoire où stocker les fichiers de calibration
-    ///                   Ex: "/home/airhaum/config"
+    /// * `chemin_base` - Répertoire où stocker les fichiers de calibration.
+    ///   Ex: "/home/airhaum/config"
     pub fn nouveau(chemin_base: impl Into<String>) -> Self {
         Self {
             chemin_base: chemin_base.into(),
@@ -263,8 +263,8 @@ static GESTIONNAIRE: OnceLock<GestionnaireCalibration> = OnceLock::new();  // �
 ///
 /// # Arguments
 ///
-/// * `chemin_config` - Chemin du répertoire de configuration
-///                     Ex: "/home/airhaum/config"
+/// * `chemin_config` - Chemin du répertoire de configuration.
+///   Ex: "/home/airhaum/config"
 pub fn initialiser_gestionnaire(chemin_config: &str) {
     GESTIONNAIRE.get_or_init(|| {
         println!("✓ Gestionnaire de calibration initialisé: {}", chemin_config);

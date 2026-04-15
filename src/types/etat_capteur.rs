@@ -5,9 +5,10 @@ use std::fmt;
 use super::Horodatage;
 
 /// État d'un capteur dans le système
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum EtatCapteur {
     /// État par défaut au démarrage ou après perte de contrôle
+    #[default]
     Inconnu,
     
     /// Capteur présent mais non configuré
@@ -101,12 +102,6 @@ impl fmt::Display for EtatCapteur {
                 write!(f, "Dégradé: {} (depuis {}s)", raison, depuis.seconds())
             }
         }
-    }
-}
-
-impl Default for EtatCapteur {
-    fn default() -> Self {
-        EtatCapteur::Inconnu
     }
 }
 

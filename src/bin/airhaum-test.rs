@@ -1,43 +1,70 @@
 // src/bin/airhaum-test.rs
-//! Console de test et diagnostic pour AirHaum II
-//! 
-//! Ce binaire permet de tester individuellement chaque composant matériel
+//! Véhicule d'intégration progressive d'AirHaum II.
+//!
+//! Ce binaire suit la même séquence de démarrage qu'`airhaum-vol`, en ajoutant
+//! à chaque étape des diagnostics et des validations explicites.
+//! Chaque itération de développement implémente une étape supplémentaire :
+//!
+//! ```text
+//! [1] Initialisation matérielle  ← itération courante
+//! [2] Vérification des capteurs
+//! [3] Calibration
+//! [4] Prêt à armer
+//! [5] Armé
+//! [6] Prêt à rouler
+//! [7] Vol autonome
+//! [8] Atterrissage / désarmement
+//! ```
+//!
+//! Règle : ne pas avancer à l'étape N+1 tant que l'étape N n'est pas validée sur cible réelle.
+
 
 use std::io::{self, Write};
+use airhaum::mission::etat_machine::{MachineEtatVol, CommandeVol};
 
-fn afficher_menu() {
+fn afficher_menu(mae: &MachineEtatVol) {
     println!("\n╔════════════════════════════════════════╗");
     println!("║     AIRHAUM II - Console de Test       ║");
+    println!("║  MAÉ : {:<32}║", format!("{}", mae.etat()));
     println!("╚════════════════════════════════════════╝");
     println!("\nTests disponibles:");
-    println!("  1.  BMP280  - Test baromètre");
+    println!("  1.  BMP280  - Test mesure baromètre");
     println!("  11. BMP280  - Calibration pré-vol");
-    println!("  2.  VL53L0X - Test télémètre (communication)");
+    println!("  12. BMP280  - Test fréquence (100 mesures)");
+    println!("  2.  VL53L0X - Test i2c télémètre");
     println!("  21. VL53L0X - Initialisation complète");
     println!("  22. VL53L0X - Mesure unique");
     println!("  23. VL53L0X - Mesures continues (10x)");
     println!("  24. VL53L0X - Diagnostic complet");
-    println!("  3.  MPU9250 - Test communication");
+    println!("  25. VL53L0X - Test fréquence (100 mesures)");
+    println!("  3.  MPU9250 - Test i2c centrale inertielle");
     println!("  31. MPU9250 - Initialisation complète");
     println!("  32. MPU9250 - Mesure unique");
     println!("  33. MPU9250 - Mesures continues (10x)");
     println!("  34. MPU9250 - Calibration gyroscope");
     println!("  35. MPU9250 - Calibration magnétomètre");
     println!("  36. MPU9250 - Diagnostic complet");
+    println!("  37. MPU9250 - Test fréquence (100 mesures)");
+    println!("  tc. Capteurs simultanés - fréquences réelles (10s)");
     println!("  t. Tous les capteurs i2c");
     println!("  q. Quitter");
     print!("\nVotre choix: ");
     io::stdout().flush().unwrap();
 }
 
-fn main() {
+//fn main() {
+#[tokio::main]
+async fn main() {
     println!("Lancement AirHaum II v{}", airhaum::VERSION);
-    println!("Initialisation de la console de test...");
+
+    // MAÉ vol — démarre en Boot
+    let mut mae = MachineEtatVol::nouveau();
+    println!("[MAÉ] État initial : {}", mae.etat());
 
     // Initialisation des services système
     airhaum::systeme::calibration::initialiser_gestionnaire("/home/airhaum/config");
-    
-    // Création du bus I²C
+
+    // Création du bus I²C → transition Boot → Initialisation
     #[cfg(target_os = "linux")]
     let mut i2c = match airhaum::hal::I2cLinux::nouveau(0) {
         Ok(bus) => bus,
@@ -49,12 +76,15 @@ fn main() {
             std::process::exit(1);
         }
     };
-    
+
     #[cfg(not(target_os = "linux"))]
     let mut i2c = airhaum::hal::i2c::I2cMock::nouveau();
-    
+
+    mae.traiter_commande(CommandeVol::DriversInitialises);
+    println!("[MAÉ] Bus I²C ouvert → {}", mae.etat());
+
     loop {
-        afficher_menu();
+        afficher_menu(&mae);
         
         let mut choix = String::new();
         io::stdin().read_line(&mut choix).unwrap();
@@ -73,6 +103,15 @@ fn main() {
                    Ok(_) => println!("\n✓ Calibration BMP280 effectuée"),
                    Err(e) => eprintln!("\n✗ Erreur calibration BMP280: {:?}", e),
                }
+            }
+
+            "12" => {
+                match airhaum::diagnostiques::diag_bmp280::test_frequence_bmp280(100) {
+                    Ok(stats) => {
+                        println!("\n✓ BMP280 : {:.2} Hz (jitter ±{:.2} ms)", stats.hz_moyen, stats.jitter_ms);
+                    }
+                    Err(e) => eprintln!("\n✗ Erreur fréquence BMP280: {:?}", e),
+                }
             }
             "2" => {
                 // Test communication VL53L0X
@@ -157,6 +196,25 @@ fn main() {
                     Err(e) => eprintln!("\n✗ Erreur: {:?}", e),
                 }
             }
+            "25" => {
+                #[cfg(target_os = "linux")]
+                let i2c_freq = match airhaum::hal::I2cLinux::nouveau(0) {
+                    Ok(bus) => bus,
+                    Err(e) => { eprintln!("❌ Erreur I²C: {:?}", e); continue; }
+                };
+                #[cfg(not(target_os = "linux"))]
+                let i2c_freq = airhaum::hal::i2c::I2cMock::nouveau();
+
+                match airhaum::diagnostiques::diag_vl53l0x::test_frequence(i2c_freq, 100) {
+                    Ok(stats) => {
+                        println!("\n✓ VL53L0X : {:.2} Hz (jitter ±{:.2} ms)", stats.hz_moyen, stats.jitter_ms);
+                    }
+                    Err(e) => eprintln!("\n✗ Erreur fréquence VL53L0X: {:?}", e),
+                }
+            }
+
+
+
             "3" => {
                 #[cfg(target_os = "linux")]
                 let i2c_mpu = match airhaum::hal::I2cLinux::nouveau(0) {
@@ -245,6 +303,29 @@ fn main() {
                 let i2c_mpu = airhaum::hal::i2c::I2cMock::nouveau();
                 match airhaum::diagnostiques::diag_mpu9250::diagnostic_complet(i2c_mpu) {
                     Ok(_) => println!("\n✓ Diagnostic terminé"),
+                    Err(e) => eprintln!("\n✗ Erreur: {:?}", e),
+                }
+            }
+            "37" => {
+                #[cfg(target_os = "linux")]
+                let i2c_freq = match airhaum::hal::I2cLinux::nouveau(0) {
+                    Ok(bus) => bus,
+                    Err(e) => { eprintln!("❌ Erreur I²C: {:?}", e); continue; }
+                };
+                #[cfg(not(target_os = "linux"))]
+                let i2c_freq = airhaum::hal::i2c::I2cMock::nouveau();
+
+                match airhaum::diagnostiques::diag_mpu9250::test_frequence(i2c_freq, 100) {
+                    Ok(stats) => {
+                        println!("\n✓ MPU9250 : {:.2} Hz (jitter ±{:.2} ms)", stats.hz_moyen, stats.jitter_ms);
+                    }
+                    Err(e) => eprintln!("\n✗ Erreur fréquence MPU9250: {:?}", e),
+                }
+            }
+
+            "tc" => {
+                match airhaum::diagnostiques::diag_taches_capteurs::test_capteurs_simultanes(10).await {
+                    Ok(_) => println!("\n✓ Test capteurs simultanés terminé"),
                     Err(e) => eprintln!("\n✗ Erreur: {:?}", e),
                 }
             }

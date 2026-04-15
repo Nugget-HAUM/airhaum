@@ -10,6 +10,7 @@
 
 pub mod calibration;
 
+
 // Réexportation pour faciliter l'utilisation
 pub use calibration::{
     CalibrationPersistante,
@@ -17,3 +18,4 @@ pub use calibration::{
     initialiser_gestionnaire,
     gestionnaire,
 };
+

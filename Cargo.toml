@@ -4,7 +4,14 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+# Accès au bus I²C Linux via /dev/i2c-X (ioctl I2C_RDWR, set_slave_address)
 i2cdev = "0.6"
+
+# Runtime asynchrone pour les couches applicatives (estimation, contrôle, mission)
 tokio = { version = "1", features = ["full"] }
+
+# Appels système bas niveau : ioctl I2C_TIMEOUT pour borner les transactions I²C
+# et éviter qu'un capteur défaillant ne monopolise le bus indéfiniment
+libc = "0.2"
 
 

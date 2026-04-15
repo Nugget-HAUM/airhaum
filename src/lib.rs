@@ -13,12 +13,15 @@ pub mod hal;         // Hardware Abstraction Layer
 pub mod drivers;     // Drivers pour capteurs et périphériques
 pub mod diagnostiques;
 pub mod systeme;
+pub mod taches;
+
+pub mod surete;
+pub mod mission;
 
 // Les modules suivants pourront être ajoutés progressivement
 // pub mod capteurs;
 // pub mod estimation;
 // pub mod controle;
-// pub mod mission;
 // pub mod communication;
 
 // Ré-export des types d'erreur pour simplifier l'usage

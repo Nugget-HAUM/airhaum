@@ -16,6 +16,7 @@ pub mod messages;
 pub mod erreurs;
 pub mod constantes;
 pub mod etat_capteur;
+pub mod mesure_frequence; 
 
 // Réexport des types les plus utilisés pour faciliter l'import
 pub use geometrie::{Vector3, Quaternion, Angle};
@@ -34,6 +35,6 @@ pub use messages::{
 pub use erreurs::{ErreursAirHaum, Result};
 pub use constantes::*;  // Exporte toutes les constantes
 pub use etat_capteur::EtatCapteur;
-
+pub use mesure_frequence::MesureFrequence;
 
 
