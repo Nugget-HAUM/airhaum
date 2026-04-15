@@ -144,7 +144,7 @@ impl<I2C: BusI2c> Mpu9250<I2C> {
     // Vérification identité
     // =========================================================================
 
-    /// Vérifie le WHO_AM_I du MPU9250 (doit retourner 0x71)
+    /// Vérifie le WHO_AM_I du MPU9250 (doit retourner 0x73)
     pub fn verifier_identite(&mut self) -> Result<bool> {
         let id = self.lire_u8(reg::WHO_AM_I)?;
         println!("MPU9250 WHO_AM_I: 0x{:02X} (attendu: 0x73)", id);
@@ -280,7 +280,7 @@ impl<I2C: BusI2c> Mpu9250<I2C> {
         // 1. Vérification identité
         if !self.verifier_identite()? {
             return Err(ErreursAirHaum::ErreurInitialisation(
-                "MPU9250: WHO_AM_I incorrect (attendu 0x71)".into()
+                "MPU9250: WHO_AM_I incorrect (attendu 0x73)".into()
             ));
         }
         self.etat = EtatCapteur::NonConfigure;
@@ -759,7 +759,7 @@ mod tests {
     #[test]
     fn test_verification_identite() {
         let mut i2c = I2cMock::nouveau();
-        i2c.precharger_registre(ADRESSE_MPU9250, reg::WHO_AM_I, 0x71);
+        i2c.precharger_registre(ADRESSE_MPU9250, reg::WHO_AM_I, 0x73);
         let mut mpu = Mpu9250::nouveau(i2c, ADRESSE_MPU9250);
         assert!(mpu.verifier_identite().unwrap());
     }
