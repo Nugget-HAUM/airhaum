@@ -4,7 +4,25 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+# Façade de journalisation standard — utilisée par tous les modules
+log    = { version = "0.4", features = ["std"] }
+# Horodatage ISO 8601 pour la boîte noire et le fil de vie
+chrono = "0.4"
+
+# Accès au bus I²C Linux via /dev/i2c-X (ioctl I2C_RDWR, set_slave_address)
 i2cdev = "0.6"
+
+# Runtime asynchrone pour les couches applicatives (estimation, contrôle, mission)
 tokio = { version = "1", features = ["full"] }
 
+# Appels système bas niveau : ioctl I2C_TIMEOUT pour borner les transactions I²C
+# et éviter qu'un capteur défaillant ne monopolise le bus indéfiniment
+libc = "0.2"
 
+# Accès au port série UART Linux pour le GPS (u-blox NEO-M8N sur /dev/ttyS2)
+# default-features = false : supprime les dépendances superflues (CoreFoundation macOS, etc.)
+serialport = { version = "4", default-features = false }
+
+[[bin]]
+name = "airhaum-test"
+path = "src/bin/airhaum_test/main.rs"

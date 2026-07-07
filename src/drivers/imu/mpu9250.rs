@@ -144,10 +144,10 @@ impl<I2C: BusI2c> Mpu9250<I2C> {
     // Vérification identité
     // =========================================================================
 
-    /// Vérifie le WHO_AM_I du MPU9250 (doit retourner 0x71)
+    /// Vérifie le WHO_AM_I du MPU9250 (doit retourner 0x73)
     pub fn verifier_identite(&mut self) -> Result<bool> {
         let id = self.lire_u8(reg::WHO_AM_I)?;
-        println!("MPU9250 WHO_AM_I: 0x{:02X} (attendu: 0x73)", id);
+        log::debug!(target: "imu", "MPU9250 WHO_AM_I: 0x{:02X}", id);
         Ok(id == 0x73)
     }
 
@@ -258,7 +258,7 @@ impl<I2C: BusI2c> Mpu9250<I2C> {
         let asa_y = (buf[1] as f32 - 128.0) / 256.0 + 1.0;
         let asa_z = (buf[2] as f32 - 128.0) / 256.0 + 1.0;
 
-        println!("AK8963 ASA: x={:.4} y={:.4} z={:.4}", asa_x, asa_y, asa_z);
+        log::debug!(target: "imu", "AK8963 ASA: x={:.4} y={:.4} z={:.4}", asa_x, asa_y, asa_z);
 
         // Repasser en Power Down
         self.ak_ecrire(reg_ak::CNTL1, 0x00)?;
@@ -280,7 +280,7 @@ impl<I2C: BusI2c> Mpu9250<I2C> {
         // 1. Vérification identité
         if !self.verifier_identite()? {
             return Err(ErreursAirHaum::ErreurInitialisation(
-                "MPU9250: WHO_AM_I incorrect (attendu 0x71)".into()
+                "MPU9250: WHO_AM_I incorrect (attendu 0x73)".into()
             ));
         }
         self.etat = EtatCapteur::NonConfigure;
@@ -302,7 +302,7 @@ impl<I2C: BusI2c> Mpu9250<I2C> {
         self.charger_ou_creer_calibrations(asa_x, asa_y, asa_z)?;
 
         self.etat = EtatCapteur::nouveau_operationnel();
-        println!("MPU9250: Initialisation OK");
+        log::info!(target: "imu", "MPU9250 : initialisation OK");
         Ok(())
     }
 
@@ -316,11 +316,11 @@ impl<I2C: BusI2c> Mpu9250<I2C> {
         // --- Gyro ---
         self.calib_gyro = match gest.charger::<CalibrationGyro>()? {
             Some(c) => {
-                println!("⚡ MPU9250: Calibration gyro chargée");
+                log::info!(target: "imu", "MPU9250 : calibration gyro chargée");
                 Some(c)
             }
             None => {
-                println!("🔧 MPU9250: Calibration gyro manquante, calibration...");
+                log::info!(target: "imu", "MPU9250 : calibration gyro manquante — calibration en cours");
                 let c = self.effectuer_calibration_gyro()?;
                 gest.sauvegarder(&c)?;
                 Some(c)
@@ -330,11 +330,11 @@ impl<I2C: BusI2c> Mpu9250<I2C> {
         // --- Accel ---
         self.calib_accel = match gest.charger::<CalibrationAccel>()? {
             Some(c) => {
-                println!("⚡ MPU9250: Calibration accel chargée");
+                log::info!(target: "imu", "MPU9250 : calibration accel chargée");
                 Some(c)
             }
             None => {
-                println!("🔧 MPU9250: Calibration accel manquante, calibration...");
+                log::info!(target: "imu", "MPU9250 : calibration accel manquante — calibration en cours");
                 let c = self.effectuer_calibration_accel()?;
                 gest.sauvegarder(&c)?;
                 Some(c)
@@ -344,14 +344,11 @@ impl<I2C: BusI2c> Mpu9250<I2C> {
         // --- Mag ---
         self.calib_mag = match gest.charger::<CalibrationMag>()? {
             Some(c) => {
-                println!("⚡ MPU9250: Calibration mag chargée");
+                log::info!(target: "imu", "MPU9250 : calibration mag chargée");
                 Some(c)
             }
             None => {
-                // Première fois : on sauvegarde avec ASA uniquement,
-                // l'opérateur devra lancer la procédure mag complète avant l'armement
-                println!("⚠ MPU9250: Calibration mag absente, utilisation ASA usine uniquement");
-                println!("  → Lancer calibrer_mag() avant l'armement");
+                log::warn!(target: "imu", "MPU9250 : calibration mag absente — ASA usine uniquement, calibrer avant armement");
                 let c = CalibrationMag::depuis_asa_uniquement(asa_x, asa_y, asa_z);
                 gest.sauvegarder(&c)?;
                 Some(c)
@@ -367,6 +364,7 @@ impl<I2C: BusI2c> Mpu9250<I2C> {
 
     /// Calibration gyroscope : moyenne sur 200 échantillons, capteur immobile
     fn effectuer_calibration_gyro(&mut self) -> Result<CalibrationGyro> {
+        log::info!(target: "imu", "Calibration gyro : immobile requis (5s)");
         println!("  Calibration gyro : ne pas bouger le capteur (5s)...");
         const N: i32 = 200;
         let mut sum_x = 0i32;
@@ -385,14 +383,15 @@ impl<I2C: BusI2c> Mpu9250<I2C> {
         let offset_y = (sum_y / N) as f32 * GYRO_SCALE;
         let offset_z = (sum_z / N) as f32 * GYRO_SCALE;
 
-        println!("  Gyro offsets: x={:.5} y={:.5} z={:.5} rad/s",
-                 offset_x, offset_y, offset_z);
+        log::info!(target: "imu", "Calibration gyro — offsets x={:.5} y={:.5} z={:.5} rad/s",
+                   offset_x, offset_y, offset_z);
 
         Ok(CalibrationGyro::nouvelle(offset_x, offset_y, offset_z))
     }
 
     /// Calibration accéléromètre : sol plat, Z aligné avec gravité
     fn effectuer_calibration_accel(&mut self) -> Result<CalibrationAccel> {
+        log::info!(target: "imu", "Calibration accel : capteur à plat requis (2s)");
         println!("  Calibration accel : poser le capteur à plat (2s)...");
         std::thread::sleep(std::time::Duration::from_millis(500));
 
@@ -421,8 +420,8 @@ impl<I2C: BusI2c> Mpu9250<I2C> {
         // Scale : ratio entre gravité mesurée et gravité attendue sur Z
         let scale_z = 9.80665 / (mean_z - offset_z).abs().max(0.1);
 
-        println!("  Accel offsets: x={:.4} y={:.4} z={:.4} m/s²",
-                 offset_x, offset_y, offset_z);
+        log::info!(target: "imu", "Calibration accel — offsets x={:.4} y={:.4} z={:.4} m/s²",
+                   offset_x, offset_y, offset_z);
 
         Ok(CalibrationAccel::nouvelle(
             offset_x, offset_y, offset_z,
@@ -590,7 +589,7 @@ impl<I2C: BusI2c> CentraleInertielle for Mpu9250<I2C> {
         let mag_ok   = gest.charger::<CalibrationMag>()?.is_some();
 
         if gyro_ok && accel_ok && mag_ok {
-            println!("⚡ MPU9250: Reprise rapide");
+            log::info!(target: "imu", "MPU9250 : reprise rapide");
             // On réapplique quand même la config hardware (reset programme)
             self.reveiller()?;
             self.configurer_gyro()?;
@@ -612,7 +611,7 @@ impl<I2C: BusI2c> CentraleInertielle for Mpu9250<I2C> {
         }
 
         // Initialisation complète
-        println!("🔧 MPU9250: Initialisation complète");
+        log::info!(target: "imu", "MPU9250 : initialisation complète");
         self.init_complete()
     }
 
@@ -672,6 +671,7 @@ impl<I2C: BusI2c> CentraleInertielle for Mpu9250<I2C> {
         let asa_y = self.calib_mag.map(|c| c.asa_y).unwrap_or(1.0);
         let asa_z = self.calib_mag.map(|c| c.asa_z).unwrap_or(1.0);
 
+        log::info!(target: "imu", "Calibration magnétomètre démarrée — rotations 3 axes (figure-8), 30s");
         println!("Calibration magnétomètre :");
         println!("  Effectuez des rotations lentes sur les 3 axes (figure-8)");
         println!("  Collecte pendant 30 secondes...");
@@ -695,7 +695,7 @@ impl<I2C: BusI2c> CentraleInertielle for Mpu9250<I2C> {
                 echantillons += 1;
             }
             if i % 50 == 49 {
-                println!("  {}s / 30s...", (i + 1) / 10);
+                log::debug!(target: "imu", "Calibration mag : {}s / 30s", (i + 1) / 10);
             }
         }
 
@@ -719,10 +719,10 @@ impl<I2C: BusI2c> CentraleInertielle for Mpu9250<I2C> {
         let soft_iron_y = range_max / range_y.max(0.1);
         let soft_iron_z = range_max / range_z.max(0.1);
 
-        println!("  Hard iron: x={:.2} y={:.2} z={:.2} µT",
-                 hard_iron_x, hard_iron_y, hard_iron_z);
-        println!("  Soft iron: x={:.3} y={:.3} z={:.3}",
-                 soft_iron_x, soft_iron_y, soft_iron_z);
+        log::info!(target: "imu", "Calibration mag — hard iron x={:.2} y={:.2} z={:.2} µT",
+                   hard_iron_x, hard_iron_y, hard_iron_z);
+        log::info!(target: "imu", "Calibration mag — soft iron x={:.3} y={:.3} z={:.3}",
+                   soft_iron_x, soft_iron_y, soft_iron_z);
 
         let c = CalibrationMag::nouvelle(
             asa_x, asa_y, asa_z,
@@ -732,7 +732,7 @@ impl<I2C: BusI2c> CentraleInertielle for Mpu9250<I2C> {
         crate::systeme::calibration::gestionnaire().sauvegarder(&c)?;
         self.calib_mag = Some(c);
 
-        println!("✓ Calibration magnétomètre terminée");
+        log::info!(target: "imu", "Calibration magnétomètre terminée");
         Ok(())
     }
 
@@ -759,7 +759,7 @@ mod tests {
     #[test]
     fn test_verification_identite() {
         let mut i2c = I2cMock::nouveau();
-        i2c.precharger_registre(ADRESSE_MPU9250, reg::WHO_AM_I, 0x71);
+        i2c.precharger_registre(ADRESSE_MPU9250, reg::WHO_AM_I, 0x73);
         let mut mpu = Mpu9250::nouveau(i2c, ADRESSE_MPU9250);
         assert!(mpu.verifier_identite().unwrap());
     }

@@ -86,7 +86,7 @@ impl<I2C: BusI2c> Vl53l0x<I2C> {
     /// Vérifie l'identité du capteur (Model ID doit être 0xEE)
     pub fn verifier_identite(&mut self) -> Result<bool> {
         let model_id = self.lire_u8(IDENTIFICATION_MODEL_ID)?;
-        println!("VL53L0X Model ID: 0x{:02X} (attendu: 0xEE)", model_id);
+        log::debug!(target: "telem", "VL53L0X Model ID: 0x{:02X}", model_id);
         Ok(model_id == 0xEE)
     }
 
@@ -113,7 +113,7 @@ impl<I2C: BusI2c> Vl53l0x<I2C> {
         self.ecrire_u8(0xFF, 0x01)?;
         self.ecrire_u8(0x00, 0x00)?;
         self.stop_variable = self.lire_u8(0x91)?;
-        println!("VL53L0X stop_variable: 0x{:02X}", self.stop_variable);
+        log::debug!(target: "telem", "VL53L0X stop_variable: 0x{:02X}", self.stop_variable);
         self.ecrire_u8(0x00, 0x01)?;
         self.ecrire_u8(0xFF, 0x00)?;
         self.ecrire_u8(0x80, 0x00)?;
@@ -212,7 +212,7 @@ impl<I2C: BusI2c> Vl53l0x<I2C> {
             std::thread::sleep(std::time::Duration::from_millis(10));
             let val = self.lire_u8(RESULT_INTERRUPT_STATUS)?;
             if (val & 0x07) != 0 {
-                println!("  Calibration VHV OK (INTERRUPT_STATUS=0x{:02X})", val);
+                log::debug!(target: "telem", "VL53L0X calibration VHV OK");
                 break;
             }
             timeout_ms += 10;
@@ -234,7 +234,7 @@ impl<I2C: BusI2c> Vl53l0x<I2C> {
             std::thread::sleep(std::time::Duration::from_millis(10));
             let val = self.lire_u8(RESULT_INTERRUPT_STATUS)?;
             if (val & 0x07) != 0 {
-                println!("  Calibration Phase OK (INTERRUPT_STATUS=0x{:02X})", val);
+                log::debug!(target: "telem", "VL53L0X calibration Phase OK");
                 break;
             }
             timeout_ms += 10;
@@ -405,7 +405,7 @@ impl<I2C: BusI2c> Vl53l0x<I2C> {
         crate::systeme::calibration::gestionnaire()
             .sauvegarder(&crate::drivers::telemetre::CalibrationTelemetre::nouvelle(3600))?;
 
-        println!("VL53L0X: Initialisation OK !");
+        log::info!(target: "telem", "VL53L0X : initialisation OK");
         Ok(())
     }
 
@@ -442,17 +442,22 @@ impl<I2C: BusI2c> Telemetre for Vl53l0x<I2C> {
     fn initialiser(&mut self) -> Result<()> {
         // Tentative de reprise rapide si une calibration valide existe
         if self.detecter_configuration_valide()? {
-            println!("⚡ VL53L0X: Reprise rapide - pas de calibration");
+            log::info!(target: "telem", "VL53L0X : reprise rapide");
 
             self.data_init()?;
             self.static_init()?;
+
+            // Vider un éventuel bit d'interruption périmé : sans ce clear,
+            // attendre_mesure_disponible() reviendrait immédiatement sur une
+            // ancienne mesure et lire_distance() lirait des registres vierges (0 mm).
+            self.ecrire_u8(SYSTEM_INTERRUPT_CLEAR, 0x01)?;
 
             self.etat = EtatCapteur::nouveau_operationnel();
             return Ok(());
         }
 
         // Sinon, initialisation complète
-        println!("🔧 VL53L0X: Initialisation complète");
+        log::info!(target: "telem", "VL53L0X : initialisation complète");
         self.initialisation_avec_etats()
     }
 
@@ -467,9 +472,12 @@ impl<I2C: BusI2c> Telemetre for Vl53l0x<I2C> {
 
         let distance = self.mesure_simple()?;
 
-        // Hors portée : comportement normal du capteur, pas une erreur matérielle
-        if distance >= DISTANCE_MAX_VL53L0X_MM {
-          return Err(ErreursAirHaum::HorsPortee);
+        // Hors portée : comportement normal du capteur, pas une erreur matérielle.
+        // 0 mm est physiquement impossible avec ce capteur (portée min ~30 mm) ;
+        // il indique une lecture sur un registre non encore rempli (interruption
+        // périmée) — on le traite de la même façon que 8190/8191.
+        if distance == 0 || distance >= DISTANCE_MAX_VL53L0X_MM {
+            return Err(ErreursAirHaum::HorsPortee);
         }
 
         // Incohérence réelle (zéro, variation anormale)

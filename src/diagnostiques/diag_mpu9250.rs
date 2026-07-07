@@ -181,6 +181,19 @@ pub fn calibrer_gyro<I: BusI2c>(i2c: I) -> crate::types::Result<()> {
     Ok(())
 }
 
+/// Procédure de calibration accéléromètre (à appeler au sol, carte posée à plat)
+pub fn calibrer_accel<I: BusI2c>(i2c: I) -> crate::types::Result<()> {
+    println!("=== Calibration accéléromètre MPU9250 ===");
+    println!("Poser la carte à plat sur une surface stable");
+
+    let mut mpu = Mpu9250::nouveau(i2c, crate::drivers::imu::ADRESSE_MPU9250);
+    mpu.initialiser()?;
+
+    mpu.calibrer_accel()?;
+    println!("✓ Calibration accéléromètre terminée et sauvegardée");
+    Ok(())
+}
+
 /// Procédure de calibration magnétomètre (procédure figure-8)
 pub fn calibrer_mag<I: BusI2c>(i2c: I) -> crate::types::Result<()> {
     println!("=== Calibration magnétomètre MPU9250 ===");

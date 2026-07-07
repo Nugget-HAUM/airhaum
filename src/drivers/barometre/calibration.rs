@@ -254,22 +254,22 @@ impl CalibrationPersistante for CalibrationBarometre {
     }
     
     fn est_valide(&self) -> bool {
-      self.age_secondes() < self.validite_sec
+        self.age_secondes() < self.validite_sec
     }
-    
 
     fn obtenir_horodatage(&self) -> Horodatage {
-         Horodatage::maintenant() // non significatif pour la persistance
+        Horodatage::maintenant()
     }
 
     fn age_secondes(&self) -> u64 {
-      let maintenant = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-      maintenant.saturating_sub(self.timestamp_unix_sec)
-   }
+        let maintenant = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        maintenant.saturating_sub(self.timestamp_unix_sec)
+    }
 
+    fn duree_validite_secondes(&self) -> u64 { self.validite_sec }
 }
 
 #[cfg(test)]
@@ -289,7 +289,7 @@ mod tests {
         let calib = CalibrationBarometre::nouvelle(101325.0, 3600);
         let toml = calib.vers_toml();
         
-        assert!(toml.contains("htimestamp_unix_sec"));
+        assert!(toml.contains("timestamp_unix_sec"));
         assert!(toml.contains("pression_reference_sol = 101325.00"));
         assert!(toml.contains("validite_sec = 3600"));
     }
@@ -339,7 +339,7 @@ mod tests {
     #[test]
     fn test_ignore_commentaires() {
         let toml = "# Ceci est un commentaire\n\
-                    horodatage_micros = 1000000\n\
+                    timestamp_unix_sec = 1700000000\n\
                     # Encore un commentaire\n\
                     pression_reference_sol = 101325.0\n\
                     validite_sec = 3600\n";

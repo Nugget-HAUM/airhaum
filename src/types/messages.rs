@@ -102,19 +102,63 @@ pub struct DonneesBarometre {
     pub temperature: Temperature,
 }
 
-/// Données GPS (NEO-M8N)
+/// Type de fix GPS — détermine la fiabilité des données de position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TypeFixGps {
+    /// Pas de fix (aucune position disponible).
+    Aucun,
+    /// Fix 2D uniquement (altitude non fiable).
+    Fix2D,
+    /// Fix 3D complet (position et altitude fiables).
+    Fix3D,
+    /// GNSS + Dead Reckoning (hybride inertiel).
+    GnssDr,
+}
+
+impl TypeFixGps {
+    /// Vrai si le fix est utilisable pour la navigation (2D minimum).
+    pub fn est_valide(self) -> bool {
+        self >= TypeFixGps::Fix2D
+    }
+
+    pub fn depuis_ubx(fix_type: u8) -> Self {
+        match fix_type {
+            2 => TypeFixGps::Fix2D,
+            3 => TypeFixGps::Fix3D,
+            4 => TypeFixGps::GnssDr,
+            _ => TypeFixGps::Aucun,
+        }
+    }
+}
+
+/// Données GPS (NEO-M8N / u-blox, protocole UBX NAV-PVT + NAV-DOP).
 #[derive(Debug, Clone, Copy)]
 pub struct DonneesGps {
     pub horodatage: Horodatage,
-    pub latitude: f64,           // degrés
-    pub longitude: f64,          // degrés
-    pub altitude: f32,           // mètres (au-dessus du niveau de la mer)
-    pub vitesse: f32,            // m/s
-    pub cap: f32,                // degrés (0-360)
-    pub precision_horizontale: f32,  // mètres (HDOP)
-    pub precision_verticale: f32,    // mètres (VDOP)
+    /// Latitude en degrés décimaux (WGS84).
+    pub latitude: f64,
+    /// Longitude en degrés décimaux (WGS84).
+    pub longitude: f64,
+    /// Altitude au-dessus du niveau de la mer (MSL) en mètres.
+    pub altitude_msl: f32,
+    /// Vitesse sol en m/s (NAV-PVT gSpeed).
+    pub vitesse_sol: f32,
+    /// Cap de déplacement en degrés (0–360, NAV-PVT headMot).
+    pub cap: f32,
+    /// Vitesse composante Nord en m/s.
+    pub vel_nord: f32,
+    /// Vitesse composante Est en m/s.
+    pub vel_est: f32,
+    /// Vitesse composante Bas en m/s (positive = descente).
+    pub vel_bas: f32,
+    /// Précision horizontale estimée en mètres (NAV-PVT hAcc).
+    pub precision_h: f32,
+    /// Précision verticale estimée en mètres (NAV-PVT vAcc).
+    pub precision_v: f32,
+    /// Nombre de satellites utilisés.
     pub nombre_satellites: u8,
-    pub fix_valide: bool,
+    /// Type de fix (qualité de la position).
+    pub type_fix: TypeFixGps,
 }
 
 /// Données du télémètre (VL53L0X)

@@ -13,8 +13,7 @@ use crate::types::EtatCapteur;
 /// 
 /// Ce trait permet de découpler la logique métier des implémentations
 /// hardware spécifiques (BMP280, MS5611, etc.)
-
-pub trait Barometre: Send + Sync {
+pub trait Barometre: Send {
     /// Initialise le baromètre
     /// 
     /// Cette méthode doit :
@@ -51,29 +50,34 @@ pub trait Barometre: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Pression, Temperature, Horodatage};
+    use crate::types::{Pression, Temperature, Horodatage, EtatCapteur};
     
     /// Mock pour tester le code qui utilise le trait Barometre
     struct BarometreMock {
-        operationnel: bool,
+        etat: EtatCapteur,
         pression: f32,
     }
-    
+
     impl BarometreMock {
         fn nouveau() -> Self {
             Self {
-                operationnel: true,
+                etat: EtatCapteur::Operationnel { depuis: Horodatage::maintenant() },
                 pression: 101325.0, // Pression standard au niveau de la mer
             }
         }
+
+        fn altitude_estimee(&mut self, pression_ref: f32) -> Result<f32> {
+            let alt = 44330.0 * (1.0 - (self.pression / pression_ref).powf(0.1903));
+            Ok(alt)
+        }
     }
-    
+
     impl Barometre for BarometreMock {
         fn initialiser(&mut self) -> Result<()> {
-            self.operationnel = true;
+            self.etat = EtatCapteur::Operationnel { depuis: Horodatage::maintenant() };
             Ok(())
         }
-        
+
         fn lire(&mut self) -> Result<DonneesBarometre> {
             Ok(DonneesBarometre {
                 horodatage: Horodatage::maintenant(),
@@ -81,18 +85,13 @@ mod tests {
                 temperature: Temperature::depuis_celsius(20.0),
             })
         }
-        
+
         fn configurer_frequence(&mut self, _frequence_hz: u32) -> Result<()> {
             Ok(())
         }
-        
-        fn est_operationnel(&self) -> bool {
-            self.operationnel
-        }
-        
-        fn altitude_estimee(&mut self, pression_ref: f32) -> Result<f32> {
-            let alt = 44330.0 * (1.0 - (self.pression / pression_ref).powf(0.1903));
-            Ok(alt)
+
+        fn obtenir_etat(&self) -> &EtatCapteur {
+            &self.etat
         }
     }
     

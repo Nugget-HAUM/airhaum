@@ -5,6 +5,8 @@
 
 
 /// décrit ce qui suit 
-pub mod barometre; 
+pub mod barometre;
 pub mod telemetre;
-pub mod imu; 
+pub mod imu;
+pub mod gps;
+pub mod controleur_servo;

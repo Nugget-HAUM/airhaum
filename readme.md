@@ -91,13 +91,18 @@ Le développement s'appuie sur `airhaum-test` comme véhicule d'intégration pro
 ```
 [1] Initialisation matérielle   (bus, configuration)
 [2] Vérification des capteurs   (présence, sanité)
-[3] Calibration                 (références, offsets)
-[4] Prêt à armer                (vérifications pré-vol)
-[5] Armé                        (actionneurs actifs)
-[6] Prêt à rouler               (déplacement sol)
-[7] Vol autonome
-[8] Atterrissage / désarmement
+[3] Estimation d'état active    (fusion + Kalman démarré, attitude et altitude valides)
+[4] Calibration                 (références, offsets)
+[5] Prêt à armer                (vérifications pré-vol)
+[6] Armé                        (actionneurs actifs)
+[7] Prêt à rouler               (déplacement sol)
+[8] Vol autonome
+[9] Atterrissage / désarmement
 ```
+
+L'état `AttenteArmement` de la machine à états n'est atteint qu'une fois l'estimation
+d'état opérationnelle (étape 3) : sans attitude et altitude valides, l'armement n'a
+pas de sens physique.
 
 Quand `airhaum-test` atteint l'étape [8], il est fonctionnellement équivalent à `airhaum-vol`.
 Les composants absents (GPS, LoRa…) sont intégrés au fil des itérations sans bloquer les étapes précédentes.

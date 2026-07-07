@@ -15,11 +15,12 @@ pub mod diagnostiques;
 pub mod systeme;
 pub mod taches;
 
-// Les modules suivants pourront être ajoutés progressivement
-// pub mod capteurs;
-// pub mod estimation;
+pub mod surete;
+pub mod mission;
+
+pub mod capteurs;
+pub mod estimation;
 // pub mod controle;
-// pub mod mission;
 // pub mod communication;
 
 // Ré-export des types d'erreur pour simplifier l'usage

@@ -1,82 +1,104 @@
 // src/taches/taches_capteurs.rs
-//! Tâches asynchrones de lecture continue des capteurs
+//! Threads de lecture continue des capteurs
 //!
-//! Ce module instancie et pilote les drivers capteurs dans des tâches Tokio
-//! indépendantes. Chaque tâche :
+//! Ce module instancie et pilote les drivers capteurs dans des `std::thread`
+//! indépendants. Chaque thread :
 //!
+//! - Reçoit une référence partagée [`BusPartage`] vers le bus I²C commun
 //! - Initialise son capteur au démarrage
-//! - Lit en continu et publie la dernière mesure via `tokio::sync::watch`
+//! - Lit en continu et publie les mesures via des canaux
 //! - Gère les erreurs I²C avec réinitialisation automatique et backoff exponentiel
 //! - Ne fait jamais `panic!` — toute erreur est absorbée et signalée via les canaux
+//!
+//! # Architecture du bus partagé
+//!
+//! ```text
+//!                    Arc<std::sync::Mutex<I2cLinux>>
+//!                    ┌──────────────────┐
+//!  thread_bmp280 ───▶│                  │
+//!  thread_vl53l0x───▶│   bus I²C (fd)  │──▶ /dev/i2c-1
+//!  thread_mpu9250───▶│                  │
+//!                    └──────────────────┘
+//! ```
+//!
+//! Le mutex est bloquant. Le timeout kernel `I2C_TIMEOUT` (~10 ms) garantit
+//! que le verrou est toujours libéré rapidement même en cas de capteur défaillant.
 //!
 //! # Architecture des canaux
 //!
 //! ```text
-//! tache_bmp280   ──watch──→  rx_baro   ──┐
-//! tache_vl53l0x  ──watch──→  rx_telem  ──┼──→ capteurs/ (fusion) → estimation/ (Kalman)
-//! tache_mpu9250  ──watch──→  rx_imu    ──┘
+//! thread_bmp280  ──valeur courante──▶  rx_baro   → Kalman (correction)
+//! thread_vl53l0x ──valeur courante──▶  rx_telem  → Kalman (correction)
+//! thread_mpu9250 ──FIFO borné     ──▶  rx_imu    → Kalman (prédiction)
 //! ```
 //!
-//! # Utilisation
-//!
-//! ```ignore
-//! let capteurs = lancer_capteurs().await;
-//! let derniere_imu = capteurs.rx_imu.borrow().clone();
-//! ```
+//! Le canal IMU est un FIFO borné (`mpsc`, [`FIFO_IMU_CAPACITE`] slots) :
+//! toutes les mesures sont transmises dans l'ordre avec leurs horodatages,
+//! indispensable pour l'intégration gyroscope du filtre de Kalman.
+//! Les canaux baro/télémètre sont à valeur courante (`watch`) : seule la
+//! dernière mesure compte pour les corrections Kalman.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
-use tokio::sync::watch;
-use tokio::task::JoinHandle;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::time::Duration;
+use tokio::sync::{watch, mpsc};
 
-use crate::types::{DonneesBarometre, DonneesImu};
+use crate::hal::BusPartage;
+use crate::types::{DonneesBarometre, DonneesImu, Result};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Paramètres de robustesse
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Nombre d'erreurs consécutives avant de tenter une réinitialisation du capteur
+/// Nombre d'erreurs consécutives avant de tenter une réinitialisation du capteur.
 const ERREURS_AVANT_REINIT: u32 = 5;
 
-/// Nombre de réinitialisations consécutives avant suspension longue de la tâche
+/// Nombre de réinitialisations consécutives avant suspension longue du thread.
 const REINIT_MAX: u32 = 10;
 
-/// Délai initial du backoff après une erreur (ms)
+/// Délai initial du backoff après une erreur (ms).
 const BACKOFF_INITIAL_MS: u64 = 100;
 
-/// Facteur multiplicatif du backoff exponentiel
+/// Facteur multiplicatif du backoff exponentiel.
 const BACKOFF_FACTEUR: u64 = 2;
 
-/// Délai maximum du backoff — borne supérieure pour rester réactif
+/// Délai maximum du backoff — borne supérieure pour rester réactif.
 const BACKOFF_MAX_MS: u64 = 5_000;
 
+/// Cadence de lecture du BMP280 en mode normal (~43 Hz, cycle mesure ~23 ms).
+const PERIODE_BARO_MS: u64 = 23;
+
+/// Cadence de lecture de l'IMU (200 Hz → 5 ms).
+const PERIODE_IMU_MS: u64 = 5;
+
+/// Capacité du FIFO IMU : 20 mesures × 5 ms = 100 ms de buffer.
+///
+/// Si le consommateur (Kalman) a plus de 100 ms de retard, les mesures
+/// excédentaires sont abandonnées avec un avertissement. Le thread IMU
+/// n'est jamais bloqué par un consommateur lent.
+pub const FIFO_IMU_CAPACITE: usize = 20;
+
 // ─────────────────────────────────────────────────────────────────────────────
-// Types publiés sur les canaux watch
+// Types publiés sur les canaux
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Mesure baromètre avec métadonnées de fiabilité
-///
-/// Le champ `valide` permet aux consommateurs (fusion, Kalman) de savoir
-/// si la valeur est exploitable sans avoir à tester `donnees.is_some()`.
+/// Mesure baromètre avec métadonnées de fiabilité.
 #[derive(Debug, Clone)]
 pub struct MesureBaro {
     pub donnees: Option<DonneesBarometre>,
-    /// `true` si la dernière lecture a réussi
     pub valide: bool,
-    /// Nombre d'erreurs I²C consécutives en cours
     pub erreurs_consecutives: u32,
 }
 
-/// Mesure télémètre avec métadonnées de fiabilité
+/// Mesure télémètre avec métadonnées de fiabilité.
 #[derive(Debug, Clone)]
 pub struct MesureTelem {
-    /// Distance en mm, `None` si hors portée ou capteur en erreur
     pub distance_mm: Option<u16>,
     pub valide: bool,
     pub erreurs_consecutives: u32,
 }
 
-/// Mesure IMU avec métadonnées de fiabilité
+/// Mesure IMU avec métadonnées de fiabilité.
 #[derive(Debug, Clone)]
 pub struct MesureImu {
     pub donnees: Option<DonneesImu>,
@@ -88,17 +110,15 @@ pub struct MesureImu {
 // Compteurs de santé partagés
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Compteurs atomiques de santé — lisibles depuis n'importe quelle tâche
-///
-/// Destinés à la couche `surete/` (watchdog, sante.rs) une fois implémentée.
+/// Compteurs atomiques de santé — lisibles depuis n'importe quel thread ou tâche.
 #[derive(Debug)]
 pub struct SanteCapteurs {
-    pub erreurs_baro:   Arc<AtomicU32>,
-    pub erreurs_telem:  Arc<AtomicU32>,
-    pub erreurs_imu:    Arc<AtomicU32>,
-    pub reinit_baro:    Arc<AtomicU32>,
-    pub reinit_telem:   Arc<AtomicU32>,
-    pub reinit_imu:     Arc<AtomicU32>,
+    pub erreurs_baro:  Arc<AtomicU32>,
+    pub erreurs_telem: Arc<AtomicU32>,
+    pub erreurs_imu:   Arc<AtomicU32>,
+    pub reinit_baro:   Arc<AtomicU32>,
+    pub reinit_telem:  Arc<AtomicU32>,
+    pub reinit_imu:    Arc<AtomicU32>,
 }
 
 impl SanteCapteurs {
@@ -118,33 +138,128 @@ impl SanteCapteurs {
 // Handle retourné par lancer_capteurs()
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Tout ce dont le reste du système a besoin pour consommer les mesures capteurs
+/// Tout ce dont le reste du système a besoin pour consommer les mesures capteurs.
 pub struct HandlesCapteurs {
-    /// Dernière mesure baromètre disponible (non-bloquant via `.borrow()`)
+    /// Dernière mesure baromètre disponible (canal à valeur courante).
     pub rx_baro:  watch::Receiver<MesureBaro>,
-    /// Dernière mesure télémètre disponible
+    /// Dernière mesure télémètre disponible (canal à valeur courante).
     pub rx_telem: watch::Receiver<MesureTelem>,
-    /// Dernière mesure IMU disponible
-    pub rx_imu:   watch::Receiver<MesureImu>,
-    /// Compteurs de santé pour la supervision (surete/)
+    /// File de mesures IMU horodatées (FIFO borné, [`FIFO_IMU_CAPACITE`] slots).
+    ///
+    /// `Some` à la création. Pris par `prendre_rx_imu()` au lancement du thread
+    /// d'estimation — après quoi cette valeur est `None`.
+    pub rx_imu:   Option<mpsc::Receiver<MesureImu>>,
+    /// Compteurs de santé pour la supervision (`surete/`).
     pub sante:    Arc<SanteCapteurs>,
-    /// Handles des tâches Tokio (pour abort propre à l'arrêt)
-    pub taches:   Vec<JoinHandle<()>>,
+    /// Handles des threads capteurs (pour jointure à l'arrêt).
+    pub taches:   Vec<std::thread::JoinHandle<()>>,
+    /// Signal d'arrêt partagé avec les threads.
+    arret:        Arc<AtomicBool>,
+}
+
+impl HandlesCapteurs {
+    /// Signale l'arrêt à tous les threads capteurs.
+    ///
+    /// Les threads terminent leur itération courante puis s'arrêtent.
+    /// Non-bloquant : retourne immédiatement sans attendre la fin des threads.
+    pub fn arreter(&self) {
+        self.arret.store(true, Ordering::Relaxed);
+    }
+
+    /// Transfère la propriété du récepteur IMU au thread d'estimation.
+    ///
+    /// Appelé une seule fois au démarrage. Après cet appel, `rx_imu` vaut `None`
+    /// et l'accès direct aux mesures brutes n'est plus possible — seul le thread
+    /// d'estimation consomme le FIFO.
+    ///
+    /// # Panics
+    /// Panique si appelé une seconde fois (le récepteur a déjà été transféré).
+    pub fn prendre_rx_imu(&mut self) -> mpsc::Receiver<MesureImu> {
+        self.rx_imu.take()
+            .expect("[HandlesCapteurs] rx_imu déjà transféré au thread d'estimation")
+    }
+}
+
+/// Tente de détecter une reprise rapide en sondant les capteurs sur le bus
+/// déjà ouvert, avant le lancement des threads.
+///
+/// Une reprise rapide est pertinente lorsque l'appareil est **en vol** et
+/// que le logiciel vient de redémarrer (panique, watchdog, coupure brève).
+/// Dans ce cas, les capteurs sont déjà configurés et actifs : on peut court-
+/// circuiter toute la séquence sol et reprendre les commandes immédiatement.
+///
+/// Le bus passé en paramètre est le même qui sera ensuite utilisé par les
+/// threads capteurs — il n'est pas rouvert. La fonction l'emprunte le temps
+/// de lire quelques registres, puis les threads prennent le relais.
+///
+/// # À implémenter
+///
+/// Lire les registres de configuration de chaque capteur via `bus` :
+/// - **BMP280** : `CTRL_MEAS` doit valoir `OSRS_T_X2 | OSRS_P_X8 | MODE_NORMAL`
+/// - **MPU9250** : `PWR_MGMT_1` doit valoir `0x01` (PLL actif, non endormi)
+/// - **VL53L0X** : vérifier que le mode continu est actif
+///
+/// En parallèle, l'estimation d'état (altitude, vitesse) pourra confirmer
+/// que l'appareil est effectivement en vol avant de valider la reprise.
+///
+/// Retourne `true` si tous les capteurs sont déjà opérationnels et que les
+/// conditions de vol sont détectées.
+pub fn detecter_reprise_rapide<B: crate::hal::BusI2c + Send + 'static>(
+    _bus: &BusPartage<B>,
+) -> bool {
+    // TODO : sonder les registres de configuration de chaque capteur
+    // et vérifier les conditions de vol (altitude > seuil, vitesse > seuil).
+    false
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Point d'entrée
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Lance les trois tâches capteurs en parallèle
+/// Lance les trois threads capteurs en parallèle.
 ///
-/// À appeler une seule fois au démarrage du système, que ce soit en vol
-/// (`airhaum-vol.rs`) ou depuis un test d'intégration.
+/// Ouvre le bus I²C **une seule fois** et le partage entre les threads via
+/// [`BusPartage`] (`Arc<std::sync::Mutex<impl BusI2c>>`).
 ///
-/// Chaque tâche ouvre son propre descripteur `/dev/i2c-0`. Le noyau Linux
-/// sérialise les accès physiques au bus — il n'y a pas de conflit.
-pub async fn lancer_capteurs() -> HandlesCapteurs {
+/// À appeler une seule fois au démarrage du système.
+///
+/// # Erreurs
+/// Retourne une erreur si le bus I²C ne peut pas être ouvert.
+/// Les erreurs survenant après le démarrage sont gérées en interne
+/// par chaque thread (backoff + réinitialisation).
+#[cfg(target_os = "linux")]
+pub fn lancer_capteurs() -> Result<HandlesCapteurs> {
+    use crate::hal::i2c_linux::I2cLinux;
+
+    let bus: BusPartage<I2cLinux> = Arc::new(std::sync::Mutex::new(
+        I2cLinux::nouveau(0).map_err(|e| {
+            log::error!(target: "systeme", "Impossible d'ouvrir le bus I²C : {:?}", e);
+            e
+        })?
+    ));
+
+    Ok(lancer_avec_bus(bus))
+}
+
+/// Variante hors-Linux utilisant le mock I²C (développement / CI).
+#[cfg(not(target_os = "linux"))]
+pub fn lancer_capteurs() -> Result<HandlesCapteurs> {
+    use crate::hal::i2c::I2cMock;
+
+    let bus: BusPartage<I2cMock> = Arc::new(std::sync::Mutex::new(I2cMock::nouveau()));
+    Ok(lancer_avec_bus(bus))
+}
+
+/// Implémentation commune — indépendante de l'implémentation du bus.
+///
+/// Séparée de `lancer_capteurs` pour permettre les tests d'intégration avec
+/// un bus mock injecté explicitement.
+pub fn lancer_avec_bus<B>(bus: BusPartage<B>) -> HandlesCapteurs
+where
+    B: crate::hal::BusI2c + Send + 'static,
+{
     let sante = Arc::new(SanteCapteurs::nouveau());
+    let arret = Arc::new(AtomicBool::new(false));
 
     let (tx_baro, rx_baro) = watch::channel(MesureBaro {
         donnees: None, valide: false, erreurs_consecutives: 0,
@@ -152,156 +267,151 @@ pub async fn lancer_capteurs() -> HandlesCapteurs {
     let (tx_telem, rx_telem) = watch::channel(MesureTelem {
         distance_mm: None, valide: false, erreurs_consecutives: 0,
     });
-    let (tx_imu, rx_imu) = watch::channel(MesureImu {
-        donnees: None, valide: false, erreurs_consecutives: 0,
-    });
+    let (tx_imu, rx_imu) = mpsc::channel(FIFO_IMU_CAPACITE);
 
     let mut taches = Vec::new();
 
-    taches.push(tokio::spawn({
-        let cpt_err = Arc::clone(&sante.erreurs_baro);
-        let cpt_reinit = Arc::clone(&sante.reinit_baro);
-        async move { tache_bmp280(tx_baro, cpt_err, cpt_reinit).await; }
-    }));
+    taches.push(std::thread::Builder::new()
+        .name("capteur-bmp280".into())
+        .spawn({
+            let bus    = Arc::clone(&bus);
+            let err    = Arc::clone(&sante.erreurs_baro);
+            let reinit = Arc::clone(&sante.reinit_baro);
+            let arret  = Arc::clone(&arret);
+            move || thread_bmp280(bus, tx_baro, err, reinit, arret)
+        })
+        .expect("Impossible de créer le thread capteur-bmp280"));
 
-    taches.push(tokio::spawn({
-        let cpt_err = Arc::clone(&sante.erreurs_telem);
-        let cpt_reinit = Arc::clone(&sante.reinit_telem);
-        async move { tache_vl53l0x(tx_telem, cpt_err, cpt_reinit).await; }
-    }));
+    taches.push(std::thread::Builder::new()
+        .name("capteur-vl53l0x".into())
+        .spawn({
+            let bus    = Arc::clone(&bus);
+            let err    = Arc::clone(&sante.erreurs_telem);
+            let reinit = Arc::clone(&sante.reinit_telem);
+            let arret  = Arc::clone(&arret);
+            move || thread_vl53l0x(bus, tx_telem, err, reinit, arret)
+        })
+        .expect("Impossible de créer le thread capteur-vl53l0x"));
 
-    taches.push(tokio::spawn({
-        let cpt_err = Arc::clone(&sante.erreurs_imu);
-        let cpt_reinit = Arc::clone(&sante.reinit_imu);
-        async move { tache_mpu9250(tx_imu, cpt_err, cpt_reinit).await; }
-    }));
+    taches.push(std::thread::Builder::new()
+        .name("capteur-mpu9250".into())
+        .spawn({
+            let bus    = Arc::clone(&bus);
+            let err    = Arc::clone(&sante.erreurs_imu);
+            let reinit = Arc::clone(&sante.reinit_imu);
+            let arret  = Arc::clone(&arret);
+            move || thread_mpu9250(bus, tx_imu, err, reinit, arret)
+        })
+        .expect("Impossible de créer le thread capteur-mpu9250"));
 
-    HandlesCapteurs { rx_baro, rx_telem, rx_imu, sante, taches }
+    HandlesCapteurs { rx_baro, rx_telem, rx_imu: Some(rx_imu), sante, taches, arret }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Macro interne : boucle de résilience commune aux 3 tâches
-// ─────────────────────────────────────────────────────────────────────────────
-//
-// Les trois tâches ont la même structure :
-//   loop {
-//     1. Initialiser le capteur (avec backoff si échec)
-//     2. Boucle de lecture (break → retour à 1 si trop d'erreurs)
-//   }
-//
-// Les différences sont : le type du capteur, la fonction de lecture,
-// la valeur publiée en cas d'erreur. On les implémente séparément
-// pour garder le code lisible et typé.
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Tâche BMP280
+// Thread BMP280
 // ─────────────────────────────────────────────────────────────────────────────
 
-async fn tache_bmp280(
-    tx: watch::Sender<MesureBaro>,
-    cpt_err: Arc<AtomicU32>,
+fn thread_bmp280<B: crate::hal::BusI2c + 'static>(
+    bus:    BusPartage<B>,
+    tx:     watch::Sender<MesureBaro>,
+    cpt_err:    Arc<AtomicU32>,
     cpt_reinit: Arc<AtomicU32>,
+    arret:  Arc<AtomicBool>,
 ) {
     let mut erreurs_consecutives = 0u32;
-    let mut nb_reinit = 0u32;
+    let mut nb_reinit  = 0u32;
     let mut backoff_ms = BACKOFF_INITIAL_MS;
 
     loop {
-        let init_result = init_bmp280().await;
+        if arret.load(Ordering::Relaxed) { break; }
 
-        let mut capteur = match init_result {
-            Ok(c) => {
-                backoff_ms = BACKOFF_INITIAL_MS;
-                nb_reinit = 0;
-                c
-            }
+        let mut capteur = match init_bmp280(&bus) {
+            Ok(c)  => { backoff_ms = BACKOFF_INITIAL_MS; nb_reinit = 0; c }
             Err(_) => {
                 nb_reinit += 1;
                 cpt_reinit.fetch_add(1, Ordering::Relaxed);
                 let _ = tx.send(MesureBaro { donnees: None, valide: false, erreurs_consecutives: nb_reinit });
                 if nb_reinit >= REINIT_MAX {
-                    eprintln!("[BMP280] ❌ {} réinitialisations sans succès — suspension 30s", nb_reinit);
-                    tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+                    log::error!(target: "baro", "BMP280 : {} réinitialisations sans succès — suspension 30s", nb_reinit);
+                    std::thread::sleep(Duration::from_secs(30));
                     nb_reinit = 0;
                     backoff_ms = BACKOFF_INITIAL_MS;
                 } else {
-                    eprintln!("[BMP280] Init échouée, nouvelle tentative dans {}ms", backoff_ms);
-                    tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
+                    log::warn!(target: "baro", "BMP280 : init échouée — nouvelle tentative dans {}ms", backoff_ms);
+                    std::thread::sleep(Duration::from_millis(backoff_ms));
                     backoff_ms = (backoff_ms * BACKOFF_FACTEUR).min(BACKOFF_MAX_MS);
                 }
                 continue;
             }
         };
 
-        // Boucle de lecture
         use crate::interfaces::barometre::Barometre;
         loop {
+            if arret.load(Ordering::Relaxed) { return; }
+
             match capteur.lire() {
                 Ok(donnees) => {
                     erreurs_consecutives = 0;
                     backoff_ms = BACKOFF_INITIAL_MS;
                     let _ = tx.send(MesureBaro {
-                        donnees: Some(donnees),
-                        valide: true,
-                        erreurs_consecutives: 0,
+                        donnees: Some(donnees), valide: true, erreurs_consecutives: 0,
                     });
+                    // Pacing : BMP280 en mode normal produit une mesure toutes les ~23 ms
+                    std::thread::sleep(Duration::from_millis(PERIODE_BARO_MS));
                 }
                 Err(e) => {
                     erreurs_consecutives += 1;
                     cpt_err.fetch_add(1, Ordering::Relaxed);
-                    let _ = tx.send(MesureBaro {
-                        donnees: None,
-                        valide: false,
-                        erreurs_consecutives,
-                    });
+                    let _ = tx.send(MesureBaro { donnees: None, valide: false, erreurs_consecutives });
                     if erreurs_consecutives >= ERREURS_AVANT_REINIT {
-                        eprintln!("[BMP280] {} erreurs consécutives — réinitialisation ({:?})",
-                                  erreurs_consecutives, e);
-                        tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
+                        log::warn!(target: "baro", "BMP280 : {} erreurs consécutives — réinitialisation ({:?})",
+                                   erreurs_consecutives, e);
+                        std::thread::sleep(Duration::from_millis(backoff_ms));
                         backoff_ms = (backoff_ms * BACKOFF_FACTEUR).min(BACKOFF_MAX_MS);
                         cpt_reinit.fetch_add(1, Ordering::Relaxed);
                         erreurs_consecutives = 0;
-                        break; // → retour boucle d'init
+                        break; // retour boucle externe → réinitialisation
                     } else {
-                        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                        std::thread::sleep(Duration::from_millis(50));
                     }
                 }
             }
-            tokio::task::yield_now().await;
         }
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Tâche VL53L0X
+// Thread VL53L0X
 // ─────────────────────────────────────────────────────────────────────────────
 
-async fn tache_vl53l0x(
-    tx: watch::Sender<MesureTelem>,
-    cpt_err: Arc<AtomicU32>,
+fn thread_vl53l0x<B: crate::hal::BusI2c + 'static>(
+    bus:    BusPartage<B>,
+    tx:     watch::Sender<MesureTelem>,
+    cpt_err:    Arc<AtomicU32>,
     cpt_reinit: Arc<AtomicU32>,
+    arret:  Arc<AtomicBool>,
 ) {
     let mut erreurs_consecutives = 0u32;
-    let mut nb_reinit = 0u32;
+    let mut nb_reinit  = 0u32;
     let mut backoff_ms = BACKOFF_INITIAL_MS;
 
     loop {
-        let init_result = init_vl53l0x().await;
+        if arret.load(Ordering::Relaxed) { break; }
 
-        let mut capteur = match init_result {
-            Ok(c) => { backoff_ms = BACKOFF_INITIAL_MS; nb_reinit = 0; c }
+        let mut capteur = match init_vl53l0x(&bus) {
+            Ok(c)  => { backoff_ms = BACKOFF_INITIAL_MS; nb_reinit = 0; c }
             Err(_) => {
                 nb_reinit += 1;
                 cpt_reinit.fetch_add(1, Ordering::Relaxed);
                 let _ = tx.send(MesureTelem { distance_mm: None, valide: false, erreurs_consecutives: nb_reinit });
                 if nb_reinit >= REINIT_MAX {
-                    eprintln!("[VL53L0X] ❌ {} réinitialisations sans succès — suspension 30s", nb_reinit);
-                    tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+                    log::error!(target: "telem", "VL53L0X : {} réinitialisations sans succès — suspension 30s", nb_reinit);
+                    std::thread::sleep(Duration::from_secs(30));
                     nb_reinit = 0;
                     backoff_ms = BACKOFF_INITIAL_MS;
                 } else {
-                    eprintln!("[VL53L0X] Init échouée, nouvelle tentative dans {}ms", backoff_ms);
-                    tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
+                    log::warn!(target: "telem", "VL53L0X : init échouée — nouvelle tentative dans {}ms", backoff_ms);
+                    std::thread::sleep(Duration::from_millis(backoff_ms));
                     backoff_ms = (backoff_ms * BACKOFF_FACTEUR).min(BACKOFF_MAX_MS);
                 }
                 continue;
@@ -310,11 +420,12 @@ async fn tache_vl53l0x(
 
         use crate::interfaces::telemetre::Telemetre;
         loop {
+            if arret.load(Ordering::Relaxed) { return; }
+
             match capteur.mesurer_distance() {
                 Ok(dist) => {
                     erreurs_consecutives = 0;
                     backoff_ms = BACKOFF_INITIAL_MS;
-                    // Publier None si hors portée plutôt qu'une valeur mensongère
                     let dist_valide = if dist < capteur.obtenir_portee_max() {
                         Some(dist)
                     } else {
@@ -325,59 +436,76 @@ async fn tache_vl53l0x(
                         valide: dist_valide.is_some(),
                         erreurs_consecutives: 0,
                     });
+                    // Pas de sleep explicite : le VL53L0X bloque pendant la mesure (~30 ms)
+                }
+                Err(crate::types::ErreursAirHaum::HorsPortee) => {
+                    // Comportement normal : aucun obstacle dans la portée du capteur.
+                    // Le matériel fonctionne correctement — on ne compte pas cela
+                    // comme une erreur et on ne déclenche pas de réinitialisation.
+                    erreurs_consecutives = 0;
+                    backoff_ms = BACKOFF_INITIAL_MS;
+                    let _ = tx.send(MesureTelem {
+                        distance_mm: None,
+                        valide: true,
+                        erreurs_consecutives: 0,
+                    });
                 }
                 Err(e) => {
                     erreurs_consecutives += 1;
                     cpt_err.fetch_add(1, Ordering::Relaxed);
                     let _ = tx.send(MesureTelem { distance_mm: None, valide: false, erreurs_consecutives });
                     if erreurs_consecutives >= ERREURS_AVANT_REINIT {
-                        eprintln!("[VL53L0X] {} erreurs consécutives — réinitialisation ({:?})",
-                                  erreurs_consecutives, e);
-                        tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
+                        log::warn!(target: "telem", "VL53L0X : {} erreurs consécutives — réinitialisation ({:?})",
+                                   erreurs_consecutives, e);
+                        std::thread::sleep(Duration::from_millis(backoff_ms));
                         backoff_ms = (backoff_ms * BACKOFF_FACTEUR).min(BACKOFF_MAX_MS);
                         cpt_reinit.fetch_add(1, Ordering::Relaxed);
                         erreurs_consecutives = 0;
                         break;
                     } else {
-                        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                        std::thread::sleep(Duration::from_millis(50));
                     }
                 }
             }
-            tokio::task::yield_now().await;
         }
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Tâche MPU9250
+// Thread MPU9250
 // ─────────────────────────────────────────────────────────────────────────────
 
-async fn tache_mpu9250(
-    tx: watch::Sender<MesureImu>,
-    cpt_err: Arc<AtomicU32>,
+fn thread_mpu9250<B: crate::hal::BusI2c + 'static>(
+    bus:    BusPartage<B>,
+    tx:     mpsc::Sender<MesureImu>,
+    cpt_err:    Arc<AtomicU32>,
     cpt_reinit: Arc<AtomicU32>,
+    arret:  Arc<AtomicBool>,
 ) {
     let mut erreurs_consecutives = 0u32;
-    let mut nb_reinit = 0u32;
+    let mut nb_reinit  = 0u32;
     let mut backoff_ms = BACKOFF_INITIAL_MS;
+    // Cadence les avertissements FIFO plein : au plus un toutes les 5 secondes.
+    let mut derniere_alerte_fifo: Option<std::time::Instant> = None;
 
     loop {
-        let init_result = init_mpu9250().await;
+        if arret.load(Ordering::Relaxed) { break; }
 
-        let mut capteur = match init_result {
-            Ok(c) => { backoff_ms = BACKOFF_INITIAL_MS; nb_reinit = 0; c }
+        let mut capteur = match init_mpu9250(&bus) {
+            Ok(c)  => { backoff_ms = BACKOFF_INITIAL_MS; nb_reinit = 0; c }
             Err(_) => {
                 nb_reinit += 1;
                 cpt_reinit.fetch_add(1, Ordering::Relaxed);
-                let _ = tx.send(MesureImu { donnees: None, valide: false, erreurs_consecutives: nb_reinit });
+                // try_send : non-bloquant, abandonne si le FIFO est plein
+                let _ = tx.try_send(MesureImu { donnees: None, valide: false, erreurs_consecutives: nb_reinit });
                 if nb_reinit >= REINIT_MAX {
-                    eprintln!("[MPU9250] ❌ {} réinitialisations sans succès — suspension 30s", nb_reinit);
-                    tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+                    log::error!(target: "imu", "MPU9250 : {} réinitialisations sans succès — suspension 30s", nb_reinit);
+                    std::thread::sleep(Duration::from_secs(30));
                     nb_reinit = 0;
                     backoff_ms = BACKOFF_INITIAL_MS;
                 } else {
-                    eprintln!("[MPU9250] Init échouée, nouvelle tentative dans {}ms", backoff_ms);
-                    tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
+                    log::warn!(target: "imu", "MPU9250 : init échouée — nouvelle tentative dans {}ms", backoff_ms);
+                    std::thread::sleep(Duration::from_millis(backoff_ms));
                     backoff_ms = (backoff_ms * BACKOFF_FACTEUR).min(BACKOFF_MAX_MS);
                 }
                 continue;
@@ -386,144 +514,92 @@ async fn tache_mpu9250(
 
         use crate::interfaces::imu::CentraleInertielle;
         loop {
+            if arret.load(Ordering::Relaxed) { return; }
+
             match capteur.lire() {
                 Ok(donnees) => {
                     erreurs_consecutives = 0;
                     backoff_ms = BACKOFF_INITIAL_MS;
-                    let _ = tx.send(MesureImu {
-                        donnees: Some(donnees),
-                        valide: true,
-                        erreurs_consecutives: 0,
-                    });
+                    if tx.try_send(MesureImu {
+                        donnees: Some(donnees), valide: true, erreurs_consecutives: 0,
+                    }).is_err() {
+                        // FIFO plein : on cadence l'avertissement à 1 par 5 secondes
+                        // pour ne pas saturer la sortie à 200 Hz.
+                        let maintenant = std::time::Instant::now();
+                        let afficher = derniere_alerte_fifo
+                            .map_or(true, |t| maintenant.duration_since(t) >= Duration::from_secs(5));
+                        if afficher {
+                            log::warn!(target: "imu", "MPU9250 : FIFO plein — mesure abandonnée (consommateur lent ?)");
+                            derniere_alerte_fifo = Some(maintenant);
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(PERIODE_IMU_MS));
                 }
                 Err(e) => {
                     erreurs_consecutives += 1;
                     cpt_err.fetch_add(1, Ordering::Relaxed);
-                    let _ = tx.send(MesureImu { donnees: None, valide: false, erreurs_consecutives });
+                    let _ = tx.try_send(MesureImu { donnees: None, valide: false, erreurs_consecutives });
                     if erreurs_consecutives >= ERREURS_AVANT_REINIT {
-                        eprintln!("[MPU9250] {} erreurs consécutives — réinitialisation ({:?})",
-                                  erreurs_consecutives, e);
-                        tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
+                        log::warn!(target: "imu", "MPU9250 : {} erreurs consécutives — réinitialisation ({:?})",
+                                   erreurs_consecutives, e);
+                        std::thread::sleep(Duration::from_millis(backoff_ms));
                         backoff_ms = (backoff_ms * BACKOFF_FACTEUR).min(BACKOFF_MAX_MS);
                         cpt_reinit.fetch_add(1, Ordering::Relaxed);
                         erreurs_consecutives = 0;
                         break;
                     } else {
-                        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                        std::thread::sleep(Duration::from_millis(10));
                     }
                 }
             }
-            tokio::task::yield_now().await;
         }
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Fonctions d'initialisation (séparées pour clarté et testabilité)
+// Fonctions d'initialisation
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[cfg(target_os = "linux")]
-async fn init_bmp280() -> Result<
-    crate::drivers::barometre::Bmp280<crate::hal::i2c_linux::I2cLinux>,
-    ()
-> {
-    use crate::hal::i2c_linux::I2cLinux;
+fn init_bmp280<B: crate::hal::BusI2c + 'static>(
+    bus: &BusPartage<B>,
+) -> std::result::Result<crate::drivers::barometre::Bmp280<BusPartage<B>>, ()>
+{
     use crate::drivers::barometre::Bmp280;
     use crate::interfaces::barometre::Barometre;
 
-    let i2c = I2cLinux::nouveau(0).map_err(|e| {
-        eprintln!("[BMP280] Impossible d'ouvrir I²C: {:?}", e);
-    })?;
-    let mut bmp = Bmp280::nouveau(i2c);
+    let mut bmp = Bmp280::nouveau(Arc::clone(bus));
     bmp.initialiser().map_err(|e| {
-        eprintln!("[BMP280] Échec initialisation: {:?}", e);
+        log::error!(target: "baro", "BMP280 échec initialisation : {:?}", e);
     })?;
     Ok(bmp)
 }
 
-#[cfg(not(target_os = "linux"))]
-async fn init_bmp280() -> Result<
-    crate::drivers::barometre::Bmp280<crate::hal::i2c::I2cMock>,
-    ()
-> {
-    use crate::hal::i2c::I2cMock;
-    use crate::drivers::barometre::Bmp280;
-    use crate::interfaces::barometre::Barometre;
-
-    let i2c = I2cMock::nouveau();
-    let mut bmp = Bmp280::nouveau(i2c);
-    bmp.initialiser().map_err(|_| ())?;
-    Ok(bmp)
-}
-
-#[cfg(target_os = "linux")]
-async fn init_vl53l0x() -> Result<
-    crate::drivers::telemetre::Vl53l0x<crate::hal::i2c_linux::I2cLinux>,
-    ()
-> {
-    use crate::hal::i2c_linux::I2cLinux;
+fn init_vl53l0x<B: crate::hal::BusI2c + 'static>(
+    bus: &BusPartage<B>,
+) -> std::result::Result<crate::drivers::telemetre::Vl53l0x<BusPartage<B>>, ()>
+{
     use crate::drivers::telemetre::Vl53l0x;
     use crate::drivers::telemetre::vl53l0x::ADRESSE_VL53L0X;
     use crate::interfaces::telemetre::Telemetre;
 
-    let i2c = I2cLinux::nouveau(0).map_err(|e| {
-        eprintln!("[VL53L0X] Impossible d'ouvrir I²C: {:?}", e);
-    })?;
-    let mut vl53 = Vl53l0x::nouveau(i2c, ADRESSE_VL53L0X);
+    let mut vl53 = Vl53l0x::nouveau(Arc::clone(bus), ADRESSE_VL53L0X);
     vl53.initialiser().map_err(|e| {
-        eprintln!("[VL53L0X] Échec initialisation: {:?}", e);
+        log::error!(target: "telem", "VL53L0X échec initialisation : {:?}", e);
     })?;
     Ok(vl53)
 }
 
-#[cfg(not(target_os = "linux"))]
-async fn init_vl53l0x() -> Result<
-    crate::drivers::telemetre::Vl53l0x<crate::hal::i2c::I2cMock>,
-    ()
-> {
-    use crate::hal::i2c::I2cMock;
-    use crate::drivers::telemetre::Vl53l0x;
-    use crate::drivers::telemetre::vl53l0x::ADRESSE_VL53L0X;
-    use crate::interfaces::telemetre::Telemetre;
-
-    let i2c = I2cMock::nouveau();
-    let mut vl53 = Vl53l0x::nouveau(i2c, ADRESSE_VL53L0X);
-    vl53.initialiser().map_err(|_| ())?;
-    Ok(vl53)
-}
-
-#[cfg(target_os = "linux")]
-async fn init_mpu9250() -> Result<
-    crate::drivers::imu::Mpu9250<crate::hal::i2c_linux::I2cLinux>,
-    ()
-> {
-    use crate::hal::i2c_linux::I2cLinux;
+fn init_mpu9250<B: crate::hal::BusI2c + 'static>(
+    bus: &BusPartage<B>,
+) -> std::result::Result<crate::drivers::imu::Mpu9250<BusPartage<B>>, ()>
+{
     use crate::drivers::imu::Mpu9250;
     use crate::drivers::imu::ADRESSE_MPU9250;
     use crate::interfaces::imu::CentraleInertielle;
 
-    let i2c = I2cLinux::nouveau(0).map_err(|e| {
-        eprintln!("[MPU9250] Impossible d'ouvrir I²C: {:?}", e);
-    })?;
-    let mut mpu = Mpu9250::nouveau(i2c, ADRESSE_MPU9250);
+    let mut mpu = Mpu9250::nouveau(Arc::clone(bus), ADRESSE_MPU9250);
     mpu.initialiser().map_err(|e| {
-        eprintln!("[MPU9250] Échec initialisation: {:?}", e);
+        log::error!(target: "imu", "MPU9250 échec initialisation : {:?}", e);
     })?;
-    Ok(mpu)
-}
-
-#[cfg(not(target_os = "linux"))]
-async fn init_mpu9250() -> Result<
-    crate::drivers::imu::Mpu9250<crate::hal::i2c::I2cMock>,
-    ()
-> {
-    use crate::hal::i2c::I2cMock;
-    use crate::drivers::imu::Mpu9250;
-    use crate::drivers::imu::ADRESSE_MPU9250;
-    use crate::interfaces::imu::CentraleInertielle;
-
-    let i2c = I2cMock::nouveau();
-    let mut mpu = Mpu9250::nouveau(i2c, ADRESSE_MPU9250);
-    mpu.initialiser().map_err(|_| ())?;
     Ok(mpu)
 }

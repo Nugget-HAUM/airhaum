@@ -1,5 +1,5 @@
 // src/diagnostiques/diag_taches_capteurs.rs
-//! Diagnostic des tâches capteurs en fonctionnement simultané
+//! Diagnostic des threads capteurs en fonctionnement simultané
 //!
 //! Teste la brique `taches/taches_capteurs.rs` telle qu'elle sera
 //! utilisée en vol : les 3 capteurs tournent en parallèle sur le
@@ -15,18 +15,30 @@ use crate::taches::taches_capteurs::lancer_capteurs;
 /// Affiche un tableau de synthèse et retourne `Ok(())` si tous les capteurs
 /// ont produit des mesures. Appelé depuis `airhaum-test.rs` option `tc`.
 pub async fn test_capteurs_simultanes(duree_secs: u64) -> crate::types::Result<()> {
-    println!("\n=== Capteurs simultanés ({} secondes) ===", duree_secs);
-    println!("Lance les tâches de vol réelles et mesure les fréquences en parallèle.\n");
+    let mut capteurs = match lancer_capteurs() {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("[diag] Impossible de démarrer les capteurs : {:?}", e);
+            return Err(e);
+        }
+    };
 
-    let capteurs = lancer_capteurs().await;
-    println!("✓ Tâches capteurs lancées\n");
+    println!("\n=== Capteurs simultanés ({} secondes) ===", duree_secs);
+    println!("Lance les threads de vol réels et mesure les fréquences en parallèle.\n");
+    println!("✓ Threads capteurs lancés\n");
 
     // Attendre la première mesure de chaque capteur (max 5s)
     let debut_init = Instant::now();
+    let mut imu_ok = false;
+    // Extraire rx_imu pour l'utiliser indépendamment de capteurs
+    let mut rx_imu = capteurs.prendre_rx_imu();
     loop {
         let baro_ok  = capteurs.rx_baro.borrow().donnees.is_some();
         let telem_ok = capteurs.rx_telem.borrow().valide;
-        let imu_ok   = capteurs.rx_imu.borrow().donnees.is_some();
+        // Vider le FIFO IMU pour détecter la première mesure valide
+        while let Ok(m) = rx_imu.try_recv() {
+            if m.donnees.is_some() { imu_ok = true; }
+        }
         if baro_ok && telem_ok && imu_ok { break; }
         if debut_init.elapsed() > Duration::from_secs(5) {
             eprintln!("⚠ Timeout démarrage (baro={} telem={} imu={})", baro_ok, telem_ok, imu_ok);
@@ -37,12 +49,13 @@ pub async fn test_capteurs_simultanes(duree_secs: u64) -> crate::types::Result<(
     println!("✓ Première mesure reçue ({:.0}ms)\n", debut_init.elapsed().as_millis());
 
     // Comptage sur duree_secs
+    // Les canaux baro/telem sont à valeur courante (watch) : on clone pour
+    // obtenir des récepteurs indépendants et marquer la valeur courante comme vue.
     let mut rx_baro  = capteurs.rx_baro.clone();
     let mut rx_telem = capteurs.rx_telem.clone();
-    let mut rx_imu   = capteurs.rx_imu.clone();
     rx_baro.borrow_and_update();
     rx_telem.borrow_and_update();
-    rx_imu.borrow_and_update();
+    // Le canal IMU est un FIFO (mpsc) : on utilise directement capteurs.rx_imu.
 
     let (mut n_baro, mut n_telem, mut n_imu) = (0u64, 0u64, 0u64);
     let (mut e_baro, mut e_telem, mut e_imu) = (0u64, 0u64, 0u64);
@@ -58,8 +71,8 @@ pub async fn test_capteurs_simultanes(duree_secs: u64) -> crate::types::Result<(
             Ok(_) = rx_telem.changed() => {
                 if rx_telem.borrow_and_update().valide { n_telem += 1; } else { e_telem += 1; }
             }
-            Ok(_) = rx_imu.changed() => {
-                if rx_imu.borrow_and_update().valide { n_imu += 1; } else { e_imu += 1; }
+            Some(mesure) = rx_imu.recv() => {
+                if mesure.valide { n_imu += 1; } else { e_imu += 1; }
             }
             _ = tokio::time::sleep(tokio::time::Duration::from_millis(1)) => {}
         }
@@ -90,6 +103,6 @@ pub async fn test_capteurs_simultanes(duree_secs: u64) -> crate::types::Result<(
     println!("\n💡 Comparer avec les tests individuels (12/25/37) pour détecter");
     println!("   une dégradation due à la contention sur le bus I²C.");
 
-    for t in capteurs.taches { t.abort(); }
+    capteurs.arreter();
     Ok(())
 }

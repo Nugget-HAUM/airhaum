@@ -37,8 +37,6 @@ La MAÉ sécurité est **orthogonale** à la MAÉ vol :
 | `AtterrissageUrgence` | Atterrissage immédiat, priorité absolue |
 | `ArretUrgence`        | Coupure immédiate du moteur, puis passage en AtterissageUrgence en planeur |
 
-```
-
 Tout état peut basculer vers `AtterrissageUrgence` sur condition critique.
 
 ---

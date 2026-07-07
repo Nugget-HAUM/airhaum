@@ -215,7 +215,7 @@ pub fn test_frequence_bmp280(n_mesures: usize) -> Result<MesureFrequence> {
                 stats.hz_moyen, FREQUENCE_CIBLE_HZ
             );
         }
-        return Ok(stats);
+        Ok(stats)
     }
 }
 

@@ -11,10 +11,12 @@
 pub mod barometre;
 pub mod telemetre;
 pub mod imu;
+pub mod gps;
 
 pub use barometre::Barometre;
 pub use telemetre::Telemetre;
 pub use imu::CentraleInertielle;
+pub use gps::CapteurGps;
 
 
 

@@ -9,11 +9,13 @@
 //! - Watchdog (à venir)
 
 pub mod calibration;
+pub mod journalisation;
 
 
 // Réexportation pour faciliter l'utilisation
 pub use calibration::{
     CalibrationPersistante,
+    EtatCalibration,
     GestionnaireCalibration,
     initialiser_gestionnaire,
     gestionnaire,

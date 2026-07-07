@@ -49,7 +49,8 @@ async fn test_capteurs_simultanes_frequences() {
 
     println!("\n=== Test capteurs simultanés ({} secondes) ===", DUREE_TEST_SECS);
 
-    let capteurs = lancer_capteurs().await;
+     let capteurs = lancer_capteurs().await
+        .expect("Bus I²C inaccessible — vérifier /dev/i2c-1 et les permissions");
 
     // ── Attendre la première mesure de chaque capteur ──────────────────────
     let debut_init = Instant::now();
