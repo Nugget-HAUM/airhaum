@@ -31,8 +31,9 @@ use console_armement::afficher_checklist_armement;
 use console_test::{
     afficher_menu, afficher_sante,
     afficher_attitude, afficher_navigation, afficher_altitude,
-    attendre_fix_gps, afficher_gps,
+    attendre_fix_gps, afficher_gps, sauvegarder_assistance_gps,
     afficher_etat_arduino, tester_debattements_servos, afficher_journal,
+    afficher_serie_telemetre,
 };
 
 #[tokio::main]
@@ -110,6 +111,7 @@ async fn main() {
     } else {
         println!("\n╔══════════════════════════════════════════════════════╗");
         println!("║     DÉMARRAGE : Séquence sol nominale                ║");
+        println!("║{:^54}║", airhaum::VERSION);
         println!("╚══════════════════════════════════════════════════════╝\n");
 
         // ── Bilan des calibrations ────────────────────────────────────────────
@@ -321,6 +323,7 @@ async fn main() {
                         Err(e) => log::error!(target: "diag", "Fréquence VL53L0X : {:?}", e),
                     }
                 }
+                "26" => afficher_serie_telemetre(&capteurs).await,
                 "3" => {
                     #[cfg(target_os = "linux")]
                     let i2c = match airhaum::hal::I2cLinux::nouveau(0) {
@@ -460,6 +463,12 @@ async fn main() {
                     match gps.as_ref() {
                         None => log::warn!(target: "gps", "GPS non disponible"),
                         Some(g) => afficher_gps(g).await,
+                    }
+                }
+                "43" => {
+                    match gps.as_ref() {
+                        None => log::warn!(target: "gps", "GPS non disponible"),
+                        Some(g) => sauvegarder_assistance_gps(g).await,
                     }
                 }
                 "5"  => afficher_etat_arduino(&servo),

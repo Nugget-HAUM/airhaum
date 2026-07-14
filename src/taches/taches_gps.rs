@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 use tokio::sync::watch;
 
-use crate::interfaces::gps::CapteurGps;
+use crate::interfaces::gps::{CapteurGps, AssistanceGnss};
 use crate::types::{DonneesGps, TypeFixGps};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -54,6 +54,17 @@ const PERIODE_GPS_MS: u64 = 200;
 
 /// Nombre de satellites minimum pour considérer le fix comme stable.
 const SEUIL_SATELLITES: u8 = 6;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Assistance GPS (voir doc/assistance_gps.md)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Résultat d'une demande de sauvegarde d'assistance GPS.
+#[derive(Debug, Clone)]
+pub enum ResultatAssistance {
+    Ok { octets_orbites: usize },
+    Erreur(String),
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types publiés sur le canal
@@ -102,6 +113,11 @@ pub struct HandlesGps {
     pub sante:  Arc<SanteGps>,
     /// Handle du thread GPS (pour jointure à l'arrêt).
     pub tache:  std::thread::JoinHandle<()>,
+    /// Compteur de demandes de sauvegarde d'assistance — incrémenté par
+    /// [`HandlesGps::demander_sauvegarde_assistance`], lu par le thread GPS.
+    tx_demande_assistance: watch::Sender<u64>,
+    /// Résultat de la dernière sauvegarde d'assistance effectuée.
+    pub rx_resultat_assistance: watch::Receiver<Option<ResultatAssistance>>,
     /// Signal d'arrêt partagé avec le thread.
     arret:      Arc<AtomicBool>,
 }
@@ -110,6 +126,14 @@ impl HandlesGps {
     /// Signale l'arrêt au thread GPS. Non-bloquant.
     pub fn arreter(&self) {
         self.arret.store(true, Ordering::Relaxed);
+    }
+
+    /// Demande au thread GPS de sauvegarder l'assistance courante (position +
+    /// orbites). Non-bloquant — le résultat arrive plus tard sur
+    /// [`rx_resultat_assistance`](Self::rx_resultat_assistance).
+    pub fn demander_sauvegarde_assistance(&self) {
+        let compteur = *self.tx_demande_assistance.borrow();
+        let _ = self.tx_demande_assistance.send(compteur.wrapping_add(1));
     }
 }
 
@@ -156,7 +180,7 @@ pub fn lancer_gps(_chemin_port: &str) -> crate::types::Result<HandlesGps> {
 
 fn lancer_avec_driver<D>(driver: D, nom_port: String) -> HandlesGps
 where
-    D: CapteurGps + Send + 'static,
+    D: CapteurGps + AssistanceGnss + Send + 'static,
 {
     let sante = Arc::new(SanteGps::nouveau());
     let arret = Arc::new(AtomicBool::new(false));
@@ -164,6 +188,8 @@ where
     let (tx_gps, rx_gps) = watch::channel(MesureGps {
         donnees: None, valide: false, erreurs_consecutives: 0,
     });
+    let (tx_demande_assistance, rx_demande_assistance) = watch::channel(0u64);
+    let (tx_resultat_assistance, rx_resultat_assistance) = watch::channel(None);
 
     let sante_thread = Arc::clone(&sante);
     let arret_thread = Arc::clone(&arret);
@@ -178,27 +204,32 @@ where
                 Arc::clone(&sante_thread.reinit),
                 arret_thread,
                 nom_port,
+                rx_demande_assistance,
+                tx_resultat_assistance,
             )
         })
         .expect("Impossible de créer le thread capteur-gps");
 
-    HandlesGps { rx_gps, sante, tache, arret }
+    HandlesGps { rx_gps, sante, tache, tx_demande_assistance, rx_resultat_assistance, arret }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Corps du thread
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn thread_gps<D: CapteurGps>(
+fn thread_gps<D: CapteurGps + AssistanceGnss>(
     mut driver:     D,
     tx:             watch::Sender<MesureGps>,
     cpt_err:        Arc<AtomicU32>,
     cpt_reinit:     Arc<AtomicU32>,
     arret:          Arc<AtomicBool>,
     nom_port:       String,
+    rx_demande_assistance: watch::Receiver<u64>,
+    tx_resultat_assistance:    watch::Sender<Option<ResultatAssistance>>,
 ) {
     let mut nb_reinit  = 0u32;
     let mut backoff_ms = BACKOFF_INITIAL_MS;
+    let mut derniere_demande = *rx_demande_assistance.borrow();
 
     // ── Boucle externe : (ré)initialisation ──────────────────────────────────
     loop {
@@ -238,6 +269,24 @@ fn thread_gps<D: CapteurGps>(
 
         loop {
             if arret.load(Ordering::Relaxed) { return; }
+
+            // ── Demande manuelle de sauvegarde d'assistance (console, option 43) ──
+            let demande = *rx_demande_assistance.borrow();
+            if demande != derniere_demande {
+                derniere_demande = demande;
+                let resultat = match driver.exporter_assistance() {
+                    Ok(assistance) => {
+                        let octets_orbites = assistance.orbites.len();
+                        match crate::systeme::calibration::gestionnaire().sauvegarder(&assistance) {
+                            Ok(())  => ResultatAssistance::Ok { octets_orbites },
+                            Err(e)  => ResultatAssistance::Erreur(format!("{:?}", e)),
+                        }
+                    }
+                    Err(e) => ResultatAssistance::Erreur(format!("{:?}", e)),
+                };
+                log::info!(target: "gps", "Assistance GPS : {:?}", resultat);
+                let _ = tx_resultat_assistance.send(Some(resultat));
+            }
 
             let nouvelle = driver.mettre_a_jour();
 

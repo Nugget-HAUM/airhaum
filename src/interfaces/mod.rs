@@ -16,7 +16,7 @@ pub mod gps;
 pub use barometre::Barometre;
 pub use telemetre::Telemetre;
 pub use imu::CentraleInertielle;
-pub use gps::CapteurGps;
+pub use gps::{CapteurGps, AssistanceGnss};
 
 
 

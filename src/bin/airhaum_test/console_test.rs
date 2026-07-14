@@ -23,6 +23,7 @@ pub fn afficher_menu(mae: &MachineEtatVol) {
     println!("  23. VL53L0X - Mesures continues (10x)");
     println!("  24. VL53L0X - Diagnostic complet");
     println!("  25. VL53L0X - Test fréquence (100 mesures)");
+    println!("  26. VL53L0X - Série de mesures (thread de fond, 10s, sans risque)");
     println!("  3.  MPU9250 - Test i2c centrale inertielle");
     println!("  31. MPU9250 - Initialisation complète");
     println!("  32. MPU9250 - Mesure unique");
@@ -34,6 +35,7 @@ pub fn afficher_menu(mae: &MachineEtatVol) {
     println!("  4.  GPS     - État actuel (depuis thread)");
     println!("  41. GPS     - Attendre fix (max 60s)");
     println!("  42. GPS     - Données en temps réel (10s)");
+    println!("  43. GPS     - Sauvegarder assistance (position + orbites)");
     println!("  5.  Arduino - État liaison et RC");
     println!("  51. Arduino - Test servos (débattements)");
     println!("  s.  Santé capteurs - état en temps réel");
@@ -163,6 +165,39 @@ pub async fn afficher_altitude(estimation: &mut HandlesEstimation) {
         n, debut.elapsed().as_secs_f32());
 }
 
+/// Affiche une série de mesures VL53L0X lues depuis le thread de fond déjà actif.
+///
+/// Contrairement aux options 22/23/24/25 (qui ouvrent une connexion I²C séparée
+/// et entrent en conflit avec `thread_vl53l0x`, toujours actif pendant la session),
+/// cette fonction lit uniquement `capteurs.rx_telem` — aucune transaction I²C
+/// supplémentaire, aucun risque de désynchroniser le capteur.
+pub async fn afficher_serie_telemetre(capteurs: &HandlesCapteurs) {
+    let debut = std::time::Instant::now();
+    let duree = std::time::Duration::from_secs(10);
+    let mut rx = capteurs.rx_telem.clone();
+    let mut n  = 0u32;
+
+    println!("\n── VL53L0X — série de mesures (thread de fond, 10 secondes) ──────");
+    println!("  {:>6}  {:>8}  {:>14}  {:>10}", "N", "Distance", "Erreurs conséc.", "Valide");
+
+    while debut.elapsed() < duree {
+        match tokio::time::timeout(std::time::Duration::from_millis(200), rx.changed()).await {
+            Ok(Ok(_)) => {
+                n += 1;
+                let m = rx.borrow_and_update().clone();
+                let dist_str = m.distance_mm
+                    .map(|d| format!("{} mm", d))
+                    .unwrap_or_else(|| "—".into());
+                println!("  {:>6}  {:>8}  {:>14}  {:>10}",
+                    n, dist_str, m.erreurs_consecutives, if m.valide { "oui" } else { "non" });
+            }
+            _ => {}
+        }
+    }
+    println!("── {} mises à jour reçues en {:.1}s ─────────────────────────────────",
+        n, debut.elapsed().as_secs_f32());
+}
+
 /// Attend le premier fix GPS depuis le thread, jusqu'à 60 secondes.
 pub async fn attendre_fix_gps(gps: &HandlesGps) {
     use airhaum::types::TypeFixGps;
@@ -238,6 +273,32 @@ pub async fn afficher_gps(gps: &HandlesGps) {
     }
     println!("── {} positions reçues en {:.1}s ─────────────────────────────────",
         n, debut.elapsed().as_secs_f32());
+}
+
+/// Demande la sauvegarde de l'assistance GPS (position + orbites AssistNow
+/// Autonomous) — voir doc/assistance_gps.md. Réinjectée automatiquement au
+/// prochain démarrage pour réduire le TTFF.
+pub async fn sauvegarder_assistance_gps(gps: &HandlesGps) {
+    use airhaum::taches::ResultatAssistance;
+
+    // Un `Receiver` fraîchement cloné considère la valeur courante comme déjà
+    // vue : `changed()` n'attend donc que le *prochain* résultat, jamais un
+    // résultat périmé d'une demande précédente.
+    let mut rx = gps.rx_resultat_assistance.clone();
+
+    println!("\n── Sauvegarde assistance GPS ────────────────────────────────────");
+    gps.demander_sauvegarde_assistance();
+
+    match tokio::time::timeout(std::time::Duration::from_secs(5), rx.changed()).await {
+        Ok(Ok(_)) => match rx.borrow_and_update().clone() {
+            Some(ResultatAssistance::Ok { octets_orbites }) =>
+                println!("  ✓ Assistance sauvegardée ({} octets d'orbites)", octets_orbites),
+            Some(ResultatAssistance::Erreur(e)) =>
+                println!("  ✗ Échec de la sauvegarde : {}", e),
+            None => println!("  ✗ Aucun résultat reçu"),
+        },
+        _ => println!("  ⚠ Timeout : pas de réponse du thread GPS en 5s"),
+    }
 }
 
 /// Affiche les `n` dernières lignes du fil de vie (journal texte lisible).

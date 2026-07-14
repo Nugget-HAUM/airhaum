@@ -6,6 +6,17 @@
 BINARY=${1:-airhaum-test}  # Par défaut : compile airhaum-test
 TARGET="armv7-unknown-linux-gnueabihf"
 REMOTE="airhaum@orangepizero.local"
+VERSION_FILE="src/lib.rs"
+
+# Incrémente le numéro de version (ex: 0.023 -> 0.024) avant compilation
+version_actuelle=$(grep 'pub const VERSION' "$VERSION_FILE" | grep -oE '[0-9]+\.[0-9]+')
+partie_entiere="${version_actuelle%%.*}"
+partie_decimale="${version_actuelle#*.}"
+largeur=${#partie_decimale}
+nouvelle_decimale=$(printf "%0${largeur}d" $((10#$partie_decimale + 1)))
+nouvelle_version="${partie_entiere}.${nouvelle_decimale}"
+sed -i "/pub const VERSION/s/${version_actuelle//./\\.}/${nouvelle_version}/" "$VERSION_FILE"
+echo "Version : $version_actuelle -> $nouvelle_version"
 
 case $BINARY in
     "airhaum-vol")

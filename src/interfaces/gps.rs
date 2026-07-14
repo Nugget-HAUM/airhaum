@@ -36,3 +36,16 @@ pub trait CapteurGps {
     /// Vrai si le récepteur a produit au moins une position avec fix >= 2D.
     fn est_operationnel(&self) -> bool;
 }
+
+/// Assistance à l'acquisition (AssistNow Autonomous + aide position), propre
+/// aux récepteurs u-blox — séparée de [`CapteurGps`] pour ne pas imposer cette
+/// capacité à un futur driver GPS non-UBX. Voir doc/assistance_gps.md.
+pub trait AssistanceGnss {
+    /// Interroge le récepteur (orbites prédites) et associe la dernière
+    /// position connue, pour sauvegarde persistante.
+    fn exporter_assistance(&mut self) -> Result<crate::drivers::gps::AssistanceGps>;
+
+    /// Réinjecte une assistance précédemment sauvegardée (position + orbites).
+    /// À appeler avant le démarrage de l'acquisition satellite.
+    fn importer_assistance(&mut self, assistance: &crate::drivers::gps::AssistanceGps) -> Result<()>;
+}

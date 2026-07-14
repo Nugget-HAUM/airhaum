@@ -6,9 +6,10 @@
 //! En test : `DriverGps<PortSerieMock>`.
 
 use crate::hal::uart::PortSerie;
-use crate::interfaces::gps::CapteurGps;
+use crate::interfaces::gps::{CapteurGps, AssistanceGnss};
 use crate::types::{DonneesGps, ErreursAirHaum, Horodatage, TypeFixGps, Result};
 use super::ubx_parser::UbxParseur;
+use super::calibration::AssistanceGps;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Constantes
@@ -28,6 +29,27 @@ const BAUDRATE_CIBLE: u32 = 115_200;
 
 /// Octets lus pour la détection du protocole au démarrage.
 const OCTETS_DETECTION: usize = 512;
+
+/// Précision de position déclarée à l'aide `UBX-MGA-INI-POS_LLH`, en cm.
+/// Volontairement large (500 m) : la position sauvegardée peut avoir dérivé
+/// (terrain de vol légèrement différent, dernière position pas parfaitement
+/// précise) — on préfère sous-promettre la précision plutôt que d'induire le
+/// récepteur en erreur sur une recherche trop étroite.
+const PRECISION_POSITION_AIDE_CM: u32 = 50_000;
+
+/// Précision temporelle déclarée à l'aide `UBX-MGA-INI-TIME_UTC`, en secondes.
+/// L'horloge système du Pi n'a pas de garantie de justesse absolue (pas de
+/// RTC connu) ; quelques secondes de marge évitent de sur-affirmer la
+/// précision du temps injecté.
+const PRECISION_TEMPS_AIDE_S: u32 = 2;
+
+/// Durée maximale d'attente des trames UBX-MGA-DBD en réponse au poll
+/// (le récepteur peut en renvoyer plusieurs, ou aucune s'il n'a rien à offrir).
+const TIMEOUT_CAPTURE_DBD_MS: u64 = 2_000;
+
+/// Silence après lequel on considère le dump MGA-DBD terminé (au moins une
+/// trame déjà reçue).
+const SILENCE_FIN_DBD_MS: u64 = 300;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Protocole détecté à l'initialisation
@@ -55,8 +77,6 @@ pub struct DriverGps<P: PortSerie> {
     port:             P,
     parseur:          UbxParseur,
     derniere_donnee:  Option<DonneesGps>,
-    /// HDOP du dernier NAV-DOP reçu (mis à jour indépendamment de NAV-PVT).
-    hdop:             Option<f32>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -69,7 +89,6 @@ impl<P: PortSerie> DriverGps<P> {
             port,
             parseur:         UbxParseur::nouveau(),
             derniere_donnee: None,
-            hdop:            None,
         }
     }
 
@@ -124,6 +143,19 @@ impl<P: PortSerie> CapteurGps for DriverGps<P> {
         self.port.reconfigurer_baudrate(BAUDRATE_CIBLE)
             .map_err(|e| ErreursAirHaum::ErreurIO(format!("GPS init 115200: {}", e)))?;
 
+        // ── Étape 4bis : réinjecter l'assistance sauvegardée si disponible ─────
+        // Doit précéder l'activation des messages NAV : l'aide doit être en
+        // place avant que le moteur GNSS ne démarre sa recherche satellite.
+        match crate::systeme::calibration::gestionnaire().charger::<AssistanceGps>() {
+            Ok(Some(assistance)) => {
+                if let Err(e) = self.importer_assistance(&assistance) {
+                    log::warn!(target: "gps", "Assistance GPS : injection échouée : {:?}", e);
+                }
+            }
+            Ok(None) => log::info!(target: "gps", "Assistance GPS : aucune sauvegarde disponible"),
+            Err(e) => log::warn!(target: "gps", "Assistance GPS : lecture échouée : {:?}", e),
+        }
+
         // ── Étape 5 : activer les messages UBX (tous les chemins) ──────────────
         log::info!(target: "gps", "Activation des messages UBX sur UART1");
         activer_messages(&mut self.port)?;
@@ -163,13 +195,8 @@ impl<P: PortSerie> CapteurGps for DriverGps<P> {
                     match (h.classe, h.id) {
                         (0x01, 0x07) => {
                             if let Some(pvt) = self.parseur.last_nav_pvt() {
-                                self.derniere_donnee = Some(pvt_vers_donnees(pvt, self.hdop));
+                                self.derniere_donnee = Some(pvt_vers_donnees(pvt));
                                 nouvelle_position = true;
-                            }
-                        }
-                        (0x01, 0x04) => {
-                            if let Some(dop) = self.parseur.last_nav_dop() {
-                                self.hdop = Some(dop.h_dop as f32 * 0.01);
                             }
                         }
                         _ => {}
@@ -192,20 +219,87 @@ impl<P: PortSerie> CapteurGps for DriverGps<P> {
     }
 }
 
+impl<P: PortSerie> AssistanceGnss for DriverGps<P> {
+    /// Interroge le récepteur (`UBX-MGA-DBD`) et capture les trames de réponse
+    /// telles quelles (blob opaque, rejoué plus tard sans être interprété).
+    fn exporter_assistance(&mut self) -> Result<AssistanceGps> {
+        let derniere = self.derniere_donnee.ok_or_else(|| ErreursAirHaum::DonneesInvalides(
+            "GPS : aucune position connue, impossible d'exporter l'assistance".into()
+        ))?;
+
+        envoyer_ubx(&mut self.port, 0x13, 0x80, &[])?; // poll MGA-DBD (payload vide)
+
+        let mut orbites = Vec::new();
+        let debut = std::time::Instant::now();
+        let mut derniere_trame = std::time::Instant::now();
+        let mut buf = [0u8; 64];
+
+        while debut.elapsed() < std::time::Duration::from_millis(TIMEOUT_CAPTURE_DBD_MS) {
+            if let Ok(n) = self.port.lire(&mut buf) {
+                for &octet in &buf[..n] {
+                    if self.parseur.alimenter(octet) {
+                        if let Some(h) = self.parseur.last_entete() {
+                            if (h.classe, h.id) == (0x13, 0x80) {
+                                let mut payload = [0u8; super::ubx_parser::TAILLE_MAX_PAYLOAD];
+                                let n = self.parseur.copier_payload(&mut payload);
+                                orbites.extend_from_slice(&(n as u16).to_le_bytes());
+                                orbites.extend_from_slice(&payload[..n]);
+                                derniere_trame = std::time::Instant::now();
+                            }
+                        }
+                    }
+                }
+            }
+            if !orbites.is_empty()
+                && derniere_trame.elapsed() > std::time::Duration::from_millis(SILENCE_FIN_DBD_MS)
+            {
+                break; // silence prolongé après réception : dump terminé
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        log::info!(target: "gps", "Assistance GPS : {} octets d'orbites capturés", orbites.len());
+
+        Ok(AssistanceGps::nouvelle(
+            derniere.latitude, derniere.longitude, derniere.altitude_msl, orbites,
+        ))
+    }
+
+    /// Réinjecte position/heure approximatives puis rejoue les trames MGA-DBD
+    /// sauvegardées.
+    fn importer_assistance(&mut self, assistance: &AssistanceGps) -> Result<()> {
+        envoyer_pos_llh(&mut self.port, assistance.latitude, assistance.longitude, assistance.altitude_msl)?;
+        envoyer_time_utc(&mut self.port)?;
+
+        let mut i = 0;
+        let mut nb_trames = 0;
+        while i + 2 <= assistance.orbites.len() {
+            let len = u16::from_le_bytes([assistance.orbites[i], assistance.orbites[i + 1]]) as usize;
+            i += 2;
+            if i + len > assistance.orbites.len() { break; }
+            envoyer_ubx(&mut self.port, 0x13, 0x80, &assistance.orbites[i..i + len])?;
+            i += len;
+            nb_trames += 1;
+        }
+
+        log::info!(target: "gps", "Assistance GPS injectée ({} octets de position, {} trames d'orbites)",
+            assistance.orbites.len(), nb_trames);
+        Ok(())
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Conversion NAV-PVT → DonneesGps
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn pvt_vers_donnees(pvt: super::ubx_parser::NavPvt, hdop: Option<f32>) -> DonneesGps {
+fn pvt_vers_donnees(pvt: super::ubx_parser::NavPvt) -> DonneesGps {
     // headMot est en 1e-5 degrés dans NAV-PVT
     let cap_deg = pvt.head_mot as f32 * 1e-5;
     // Normalise le cap entre 0 et 360
     let cap = cap_deg.rem_euclid(360.0);
 
     // h_acc et v_acc sont en mm dans NAV-PVT
-    // Si hdop est disponible (NAV-DOP), on l'utilise en précision horizontale
-    // sinon on convertit h_acc en mètres
-    let precision_h = hdop.unwrap_or(pvt.h_acc as f32 / 1000.0);
+    let precision_h = pvt.h_acc as f32 / 1000.0;
     let precision_v = pvt.v_acc as f32 / 1000.0;
 
     DonneesGps {
@@ -274,6 +368,46 @@ fn envoyer_ubx<P: PortSerie>(
     port.ecrire(&trame)
         .map_err(|e| ErreursAirHaum::ErreurIO(format!("UBX {:02X}/{:02X}: {}", classe, id, e)))?;
     Ok(())
+}
+
+/// Envoie `UBX-MGA-INI-POS_LLH` (classe 0x13, ID 0x40, type 0x00 — 20 octets).
+///
+/// L'altitude MSL est utilisée en approximation de l'altitude ellipsoïdale
+/// attendue par ce message : l'écart (ondulation du géoïde, quelques dizaines
+/// de mètres) est négligeable devant la marge déclarée par
+/// [`PRECISION_POSITION_AIDE_CM`].
+fn envoyer_pos_llh<P: PortSerie>(port: &mut P, latitude: f64, longitude: f64, altitude_msl: f32) -> Result<()> {
+    let mut payload = [0u8; 20];
+    payload[0] = 0x00; // type = POS_LLH
+    payload[1] = 0x00; // version
+    payload[4..8].copy_from_slice(&((latitude * 1e7).round() as i32).to_le_bytes());
+    payload[8..12].copy_from_slice(&((longitude * 1e7).round() as i32).to_le_bytes());
+    payload[12..16].copy_from_slice(&((altitude_msl * 100.0).round() as i32).to_le_bytes()); // cm
+    payload[16..20].copy_from_slice(&PRECISION_POSITION_AIDE_CM.to_le_bytes());
+    envoyer_ubx(port, 0x13, 0x40, &payload)
+}
+
+/// Envoie `UBX-MGA-INI-TIME_UTC` (classe 0x13, ID 0x40, type 0x10 — 24 octets),
+/// avec l'heure UTC courante de l'horloge système du Pi.
+fn envoyer_time_utc<P: PortSerie>(port: &mut P) -> Result<()> {
+    use chrono::{Datelike, Timelike};
+    let maintenant = chrono::Utc::now();
+
+    let mut payload = [0u8; 24];
+    payload[0] = 0x10; // type = TIME_UTC
+    payload[1] = 0x00; // version
+    payload[2] = 0x00; // ref : instant de réception approximatif
+    payload[3] = 0x80u8; // leapSecs = -128 (inconnu)
+    payload[4..6].copy_from_slice(&(maintenant.year() as u16).to_le_bytes());
+    payload[6] = maintenant.month() as u8;
+    payload[7] = maintenant.day() as u8;
+    payload[8] = maintenant.hour() as u8;
+    payload[9] = maintenant.minute() as u8;
+    payload[10] = maintenant.second() as u8;
+    payload[12..16].copy_from_slice(&0u32.to_le_bytes()); // ns
+    payload[16..20].copy_from_slice(&PRECISION_TEMPS_AIDE_S.to_le_bytes()); // tAccS
+    payload[20..24].copy_from_slice(&0u32.to_le_bytes()); // tAccNs
+    envoyer_ubx(port, 0x13, 0x40, &payload)
 }
 
 /// Exécutée à 9 600 bauds quand NMEA est détecté.
@@ -384,6 +518,11 @@ mod tests {
 
     #[test]
     fn position_extraite_apres_trame_valide() {
+        // initialiser() charge l'assistance GPS persistée (voir importer_assistance) —
+        // nécessite un gestionnaire de calibration initialisé, absent par défaut en test.
+        let dir = std::env::temp_dir().join("airhaum_test_calibration");
+        crate::systeme::calibration::initialiser_gestionnaire(dir.to_str().unwrap());
+
         // lat = 48.8566° N = 488566000 × 1e-7, lon = 2.3522° E = 23522000 × 1e-7
         let trame = trame_nav_pvt(488_566_000, 23_522_000, 50_000, 3, 5_000, 8);
 

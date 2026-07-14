@@ -14,13 +14,12 @@ use crate::types::{ErreursAirHaum, Result};
 // Constantes par défaut — correspondent à la configuration du NEO-M8N
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Port série du GPS (NEO-M8N) sur l'Orange Pi.
-/// Temporairement désactivé (/dev/ttyS3 inexistant) : ttyS2 est réaffecté au Nano.
-pub const PORT_GPS_DEFAUT: &str = "/dev/ttyS3";
+/// Port série du GPS (NEO-M8N) sur l'Orange Pi (UART1, broches GPIO).
+pub const PORT_GPS_DEFAUT: &str = "/dev/ttyS1";
 /// Débit en bauds du GPS.
 pub const BAUDRATE_GPS: u32 = 115_200;
 
-/// Port série de la liaison Pi ↔ Arduino Nano (UART2, broches GPIO — UART1 RX endommagé).
+/// Port série de la liaison Pi ↔ Arduino Nano (UART2, broches GPIO).
 pub const PORT_ARDUINO_DEFAUT: &str = "/dev/ttyS2";
 /// Débit en bauds de la liaison logicielle Arduino.
 pub const BAUDRATE_ARDUINO: u32 = 57_600;

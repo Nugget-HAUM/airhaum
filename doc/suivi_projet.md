@@ -43,6 +43,18 @@
   dans `taches_estimation.rs`). Pas encore de garde-fou sur les valeurs
   elles-mêmes (position aberrante, saut de vitesse).
 
+- [ ] **VL53L0X : pas de récupération logicielle en cas de verrouillage interne**
+  XSHUT est câblé en dur sur le 3V3 (pas de GPIO) : si le capteur se verrouille
+  en interne (ACK sur l'adresse I²C mais échec de toute lecture registre —
+  observé le 2026-07-08, résolu par débranchement/rebranchement physique),
+  seul un cycle d'alimentation peut le débloquer. De plus, `thread_vl53l0x`
+  (`taches_capteurs.rs`) ne distingue pas ce cas d'une erreur I²C transitoire :
+  il boucle indéfiniment (réinit + backoff + suspension 30s) sans jamais
+  remonter d'alerte à la couche sûreté (`surete/sante.rs`, pas encore
+  implémenté). À corriger en deux temps : câbler XSHUT sur une GPIO pour
+  permettre un reset matériel logiciel, puis faire remonter l'état
+  "capteur irrécupérable" à la sûreté après échec du reset.
+
 ---
 
 ## Points d'architecture à trancher
@@ -55,8 +67,7 @@
 
 ## Évolutions matérielles a achever :
 
-- GPS UART à brancher sur PI (`/dev/ttyS3` désactivé dans `hal/uart_linux.rs`,
-  le port n'existe pas encore matériellement)
+- [x] GPS branché sur PI (`/dev/ttyS1`, UART1, 115 200 bauds)
 - [x] Arduino branché sur PI (`/dev/ttyS2`, 57 600 bauds) — liaison testée logiciellement
 - Récepteur RC : câblage individuel PWM (A1–A5) à faire sur le Nano — voir
   `doc/interface_pi_rc_servos.md` et `doc/recepteur_rc.md` (IBus abandonné)

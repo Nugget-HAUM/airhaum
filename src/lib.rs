@@ -30,7 +30,7 @@ pub use diagnostiques::tester_bmp280;
 
 
 /// Version du crate (informationnelle)
-pub const VERSION: &str = "AirHaum II – développement 0.023";
+pub const VERSION: &str = "AirHaum II – développement 0.027";
 
 /// Point d'entrée logique du système de vol (à implémenter)
 pub fn demarrer_vol_autonome() {
