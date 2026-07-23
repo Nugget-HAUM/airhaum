@@ -42,14 +42,30 @@
 //! C'est correct ici car les threads capteurs sont des `std::thread` dédiés.
 
 pub mod i2c;
+pub mod uart;
+pub mod spi;
 
 #[cfg(target_os = "linux")]
 pub mod i2c_linux;
 
+#[cfg(target_os = "linux")]
+pub mod uart_linux;
+
+#[cfg(target_os = "linux")]
+pub mod spi_linux;
+
 pub use i2c::BusI2c;
+pub use uart::PortSerie;
+pub use spi::BusSpi;
 
 #[cfg(target_os = "linux")]
 pub use i2c_linux::I2cLinux;
+
+#[cfg(target_os = "linux")]
+pub use uart_linux::PortSerieLinux;
+
+#[cfg(target_os = "linux")]
+pub use spi_linux::SpiLinux;
 
 /// Bus I²C partagé entre plusieurs threads capteurs.
 ///

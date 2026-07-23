@@ -18,11 +18,10 @@ pub mod taches;
 pub mod surete;
 pub mod mission;
 
-// Les modules suivants pourront être ajoutés progressivement
-// pub mod capteurs;
-// pub mod estimation;
-// pub mod controle;
-// pub mod communication;
+pub mod capteurs;
+pub mod estimation;
+pub mod communications;
+pub mod controle;
 
 // Ré-export des types d'erreur pour simplifier l'usage
 pub use types::{ErreursAirHaum, Result};
@@ -31,7 +30,7 @@ pub use diagnostiques::tester_bmp280;
 
 
 /// Version du crate (informationnelle)
-pub const VERSION: &str = "AirHaum II – développement 0.023";
+pub const VERSION: &str = "AirHaum II – développement 0.032";
 
 /// Point d'entrée logique du système de vol (à implémenter)
 pub fn demarrer_vol_autonome() {

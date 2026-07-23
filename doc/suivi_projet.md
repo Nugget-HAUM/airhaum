@@ -5,18 +5,27 @@
 ## Prochaines étapes
 
 - [x] Refonte architecturale de la couche capteurs I2C (threads synchrones dédiés)
-- [x] Migration du BMP280 en mode normal 
-- [ ] Mise en place Machine à état avion ?
-- [ ] Système de journalisation (architecture à définir — voir ci-dessous)
-- [ ] Filtre de Kalman — prédiction IMU
-- [ ] Filtre de Kalman — corrections baro / GPS
+- [x] Migration du BMP280 en mode normal
+- [x] Machine à états de vol (MAÉ) — Boot → AttenteArmement + reprise rapide
+- [x] **Estimation d'état**
+  - [x] **[A] Prétraitement IMU** — `src/capteurs/traitement_imu.rs`
+  - [x] **[B] Attitude — filtre complémentaire** — `src/estimation/attitude.rs`
+  - [x] **[C] Thread d'estimation** — `src/taches/taches_estimation.rs` (branché dans `airhaum-test`)
+  - [x] **[D] Fusion altitude** — `src/capteurs/fusion_altitude.rs`
+  - [x] **[E] EKF** — `src/estimation/ekf_attitude.rs` + `src/estimation/ekf_navigation.rs`
+        (13 états : position/vitesse NED, quaternion, biais gyro — nommage final différent
+        du `ekf.rs` unique prévu initialement, mais même rôle)
+- [x] Calibration — `src/systeme/calibration.rs` + console dédiée `console_calibration.rs`
+- [x] Système de journalisation — voir `doc/journalisation.md`, implémenté et opérationnel
 - [ ] Contrôleur d'attitude
 - [ ] Contrôleur d'altitude
-- [ ] Couche mission (points de passage, modes de vol)
+- [ ] Couche mission — la MAÉ vol (états/transitions) est faite ; reste la logique
+      de navigation (points de passage, modes de vol) au-dessus
 
 ---
 
 ## Dettes techniques
+- [ ] ** Fréquence cilbe ** le drivers MPU tourne a 125-110hz et non 200 comme visé
 
 - [ ] **Arrêt des threads non-réactif** : `arreter()` positionne un drapeau mais un thread
   en veille longue (30 s, cas réinitialisation max) ne le voit qu'à son réveil.
@@ -25,22 +34,92 @@
 - [ ] **Vivacité des threads** : un thread qui panique silencieusement n'est pas détecté.
   La couche sûreté devra vérifier `JoinHandle::is_finished()` périodiquement.
 
+- [ ] **`MaeSecurite::reinitialiser()` jamais appelé en pratique** : la mémoire
+  d'incident (`deja_degrade_ce_vol`, plafond de rétablissement à `AlerteMineure`)
+  et l'arrêt d'urgence console (`arret_urgence_console` dans `airhaum-test`)
+  ne peuvent aujourd'hui être effacés qu'en relançant le binaire. Sans
+  conséquence tant que la convention reste 1 vol = 1 lancement du programme.
+  À traiter si cette hypothèse change (plusieurs vols par lancement) : prévoir
+  un point d'entrée explicite (ex. lors du prochain armement) qui appelle
+  `reinitialiser()` et remet `arret_urgence_console` à `false`.
+
 - panic silencieux : Si un thread capteur panique, le mutex peut être empoisonné → erreur I2C → réinit en boucle.
+
+- Pas de gestion des erreurs I2C critiques
+
+- [ ] **Lacet estimé par gyro seul, pas de fusion magnétomètre/cap GPS dans
+  l'EKF** (`estimation/ekf_navigation.rs`). Le magnétomètre AK8963 est lu
+  et calibré (`drivers/imu/mpu9250.rs`, hard/soft iron) mais jamais
+  fusionné : les seules corrections de l'EKF sont `corriger_accel`
+  (roulis/tangage via la gravité) et `corriger_gps` (position + vitesse
+  NED). Le lacet dérive donc par intégration gyro pure entre deux
+  prédictions ; la correction indirecte via le couplage vitesse/quaternion
+  du modèle de prédiction est faible et quasi nulle à basse vitesse
+  (roulage). Cohérent avec `doc/mission.md` qui documente ce choix comme
+  acceptable pour la phase de test (calibration magnétomètre acquittable
+  à l'armement). À améliorer dans un second temps : fusion magnétomètre
+  et/ou cap déduit de la vitesse sol GPS, pour un lacet plus précis en
+  vol. Ne bloque pas le développement de la couche contrôle (`doc/controle.md`),
+  qui consomme `EtatNavigation.attitude.lacet` tel qu'il existe aujourd'hui.
+
+- [x] Validation des données GPS — checksum UBX/NMEA rejeté avec resync
+  (`ubx_parser.rs`), fix non valide ignoré par la fusion. Garde-fou sur les
+  valeurs elles-mêmes (position aberrante, saut de vitesse) ajouté via
+  `capteurs/traitement_gps.rs` (`TraitementGps`), branché dans
+  `taches_estimation.rs` avant `EkfNavigation::corriger_gps`.
+
+- [ ] **Pas de RTC à sauvegarde batterie — horloge système non fiable sans réseau**
+  (reporté à la phase d'autonomie, acceptable pour la v1). Vérifié sur le Pi le
+  2026-07-18 : `sun6i-rtc` (RTC intégrée au SoC) repart de ~epoch Unix à chaque
+  démarrage (`dmesg` : `setting system clock to 1970-01-01T00:00:14 UTC`),
+  `fake-hwclock` est masqué/inactif — seul `chronyd` (NTP) corrige l'horloge,
+  et seulement si le réseau a une sortie internet. En v1, le programme est
+  toujours lancé via une connexion SSH en Wifi (au pire point d'accès 4G d'un
+  téléphone), donc une horloge valide au lancement est garantie en pratique —
+  pas de correctif nécessaire pour l'instant. À traiter avant la phase
+  autonome (lancement sans opérateur connecté), car ça impacte alors trois
+  endroits identifiés dans le code :
+  - `envoyer_time_utc()` (`drivers/gps/ublox.rs`) enverrait une heure fausse
+    de plusieurs décennies au GPS comme aide `TIME_UTC` (au lieu d'une
+    hypothèse à quelques secondes près comme le code le suppose).
+  - `est_valide()` des calibrations baromètre/IMU (`drivers/{barometre,imu}/calibration.rs`)
+    utilise `age_secondes() = maintenant.saturating_sub(timestamp_stocké)` :
+    une horloge repartie en arrière fait remonter `saturating_sub` à 0, donc
+    une calibration périmée est acceptée comme fraîche silencieusement.
+  - `systeme/journalisation.rs` horodate chaque entrée et nomme les fichiers
+    de log via `chrono::Local::now()` — logs datés vers 1970 en cas de vol
+    autonome sans réseau, gênant pour l'analyse post-vol.
+  Piste envisagée : extraire le calendrier UTC déjà présent dans NAV-PVT
+  (offsets 4-11, non parsé actuellement par `ubx_parser.rs`) et régler
+  l'horloge système au premier fix GPS valide.
+
+- [ ] **VL53L0X : pas de récupération logicielle en cas de verrouillage interne**
+  XSHUT est câblé en dur sur le 3V3 (pas de GPIO) : si le capteur se verrouille
+  en interne (ACK sur l'adresse I²C mais échec de toute lecture registre —
+  observé le 2026-07-08, résolu par débranchement/rebranchement physique),
+  seul un cycle d'alimentation peut le débloquer. De plus, `thread_vl53l0x`
+  (`taches_capteurs.rs`) ne distingue pas ce cas d'une erreur I²C transitoire :
+  il boucle indéfiniment (réinit + backoff + suspension 30s) sans jamais
+  remonter d'alerte à la couche sûreté (`surete/sante.rs`, pas encore
+  implémenté). À corriger en deux temps : câbler XSHUT sur une GPIO pour
+  permettre un reset matériel logiciel, puis faire remonter l'état
+  "capteur irrécupérable" à la sûreté après échec du reset.
 
 ---
 
 ## Points d'architecture à trancher
 
-- [ ] **Journalisation** : niveaux, destination (fichier rotatif ? mémoire circulaire ?),
-  impact sur les threads à haute fréquence (200 Hz IMU ne doit pas être ralenti).
-  Piste : canal interne vers un thread dédié à l'écriture.
+- [x] **Journalisation** : implémentée dans `src/systeme/journalisation.rs`,
+  voir `doc/journalisation.md`. Chemin de sortie configurable via
+  `AIRHAUM_LOGS_DIR` (défaut `/home/airhaum/logs`).
 
 ---
 
 ## Évolutions matérielles a achever :
 
-- GPS UART à brancher sur PI 
-- Arduino à brancher sur PI 
-- Récepteur RC a relier sur arduino 
-- ESC / moteurs (PWM  à relier sur arduino 
+- [x] GPS branché sur PI (`/dev/ttyS1`, UART1, 115 200 bauds)
+- [x] Arduino branché sur PI (`/dev/ttyS2`, 57 600 bauds) — liaison testée logiciellement
+- Récepteur RC : câblage individuel PWM (A1–A5) à faire sur le Nano — voir
+  `doc/interface_pi_rc_servos.md` et `doc/recepteur_rc.md` (IBus abandonné)
+- ESC / moteurs (PWM) à relier sur arduino
 

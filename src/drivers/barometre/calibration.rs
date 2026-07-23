@@ -254,22 +254,22 @@ impl CalibrationPersistante for CalibrationBarometre {
     }
     
     fn est_valide(&self) -> bool {
-      self.age_secondes() < self.validite_sec
+        self.age_secondes() < self.validite_sec
     }
-    
 
     fn obtenir_horodatage(&self) -> Horodatage {
-         Horodatage::maintenant() // non significatif pour la persistance
+        Horodatage::maintenant()
     }
 
     fn age_secondes(&self) -> u64 {
-      let maintenant = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-      maintenant.saturating_sub(self.timestamp_unix_sec)
-   }
+        let maintenant = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        maintenant.saturating_sub(self.timestamp_unix_sec)
+    }
 
+    fn duree_validite_secondes(&self) -> u64 { self.validite_sec }
 }
 
 #[cfg(test)]

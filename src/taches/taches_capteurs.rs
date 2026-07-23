@@ -145,7 +145,10 @@ pub struct HandlesCapteurs {
     /// Dernière mesure télémètre disponible (canal à valeur courante).
     pub rx_telem: watch::Receiver<MesureTelem>,
     /// File de mesures IMU horodatées (FIFO borné, [`FIFO_IMU_CAPACITE`] slots).
-    pub rx_imu:   mpsc::Receiver<MesureImu>,
+    ///
+    /// `Some` à la création. Pris par `prendre_rx_imu()` au lancement du thread
+    /// d'estimation — après quoi cette valeur est `None`.
+    pub rx_imu:   Option<mpsc::Receiver<MesureImu>>,
     /// Compteurs de santé pour la supervision (`surete/`).
     pub sante:    Arc<SanteCapteurs>,
     /// Handles des threads capteurs (pour jointure à l'arrêt).
@@ -162,6 +165,51 @@ impl HandlesCapteurs {
     pub fn arreter(&self) {
         self.arret.store(true, Ordering::Relaxed);
     }
+
+    /// Transfère la propriété du récepteur IMU au thread d'estimation.
+    ///
+    /// Appelé une seule fois au démarrage. Après cet appel, `rx_imu` vaut `None`
+    /// et l'accès direct aux mesures brutes n'est plus possible — seul le thread
+    /// d'estimation consomme le FIFO.
+    ///
+    /// # Panics
+    /// Panique si appelé une seconde fois (le récepteur a déjà été transféré).
+    pub fn prendre_rx_imu(&mut self) -> mpsc::Receiver<MesureImu> {
+        self.rx_imu.take()
+            .expect("[HandlesCapteurs] rx_imu déjà transféré au thread d'estimation")
+    }
+}
+
+/// Tente de détecter une reprise rapide en sondant les capteurs sur le bus
+/// déjà ouvert, avant le lancement des threads.
+///
+/// Une reprise rapide est pertinente lorsque l'appareil est **en vol** et
+/// que le logiciel vient de redémarrer (panique, watchdog, coupure brève).
+/// Dans ce cas, les capteurs sont déjà configurés et actifs : on peut court-
+/// circuiter toute la séquence sol et reprendre les commandes immédiatement.
+///
+/// Le bus passé en paramètre est le même qui sera ensuite utilisé par les
+/// threads capteurs — il n'est pas rouvert. La fonction l'emprunte le temps
+/// de lire quelques registres, puis les threads prennent le relais.
+///
+/// # À implémenter
+///
+/// Lire les registres de configuration de chaque capteur via `bus` :
+/// - **BMP280** : `CTRL_MEAS` doit valoir `OSRS_T_X2 | OSRS_P_X8 | MODE_NORMAL`
+/// - **MPU9250** : `PWR_MGMT_1` doit valoir `0x01` (PLL actif, non endormi)
+/// - **VL53L0X** : vérifier que le mode continu est actif
+///
+/// En parallèle, l'estimation d'état (altitude, vitesse) pourra confirmer
+/// que l'appareil est effectivement en vol avant de valider la reprise.
+///
+/// Retourne `true` si tous les capteurs sont déjà opérationnels et que les
+/// conditions de vol sont détectées.
+pub fn detecter_reprise_rapide<B: crate::hal::BusI2c + Send + 'static>(
+    _bus: &BusPartage<B>,
+) -> bool {
+    // TODO : sonder les registres de configuration de chaque capteur
+    // et vérifier les conditions de vol (altitude > seuil, vitesse > seuil).
+    false
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -184,8 +232,8 @@ pub fn lancer_capteurs() -> Result<HandlesCapteurs> {
     use crate::hal::i2c_linux::I2cLinux;
 
     let bus: BusPartage<I2cLinux> = Arc::new(std::sync::Mutex::new(
-        I2cLinux::nouveau(1).map_err(|e| {
-            eprintln!("[capteurs] Impossible d'ouvrir le bus I²C : {:?}", e);
+        I2cLinux::nouveau(0).map_err(|e| {
+            log::error!(target: "systeme", "Impossible d'ouvrir le bus I²C : {:?}", e);
             e
         })?
     ));
@@ -256,7 +304,7 @@ where
         })
         .expect("Impossible de créer le thread capteur-mpu9250"));
 
-    HandlesCapteurs { rx_baro, rx_telem, rx_imu, sante, taches, arret }
+    HandlesCapteurs { rx_baro, rx_telem, rx_imu: Some(rx_imu), sante, taches, arret }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -284,12 +332,12 @@ fn thread_bmp280<B: crate::hal::BusI2c + 'static>(
                 cpt_reinit.fetch_add(1, Ordering::Relaxed);
                 let _ = tx.send(MesureBaro { donnees: None, valide: false, erreurs_consecutives: nb_reinit });
                 if nb_reinit >= REINIT_MAX {
-                    eprintln!("[BMP280] ❌ {} réinitialisations sans succès — suspension 30s", nb_reinit);
+                    log::error!(target: "baro", "BMP280 : {} réinitialisations sans succès — suspension 30s", nb_reinit);
                     std::thread::sleep(Duration::from_secs(30));
                     nb_reinit = 0;
                     backoff_ms = BACKOFF_INITIAL_MS;
                 } else {
-                    eprintln!("[BMP280] Init échouée, nouvelle tentative dans {}ms", backoff_ms);
+                    log::warn!(target: "baro", "BMP280 : init échouée — nouvelle tentative dans {}ms", backoff_ms);
                     std::thread::sleep(Duration::from_millis(backoff_ms));
                     backoff_ms = (backoff_ms * BACKOFF_FACTEUR).min(BACKOFF_MAX_MS);
                 }
@@ -316,8 +364,8 @@ fn thread_bmp280<B: crate::hal::BusI2c + 'static>(
                     cpt_err.fetch_add(1, Ordering::Relaxed);
                     let _ = tx.send(MesureBaro { donnees: None, valide: false, erreurs_consecutives });
                     if erreurs_consecutives >= ERREURS_AVANT_REINIT {
-                        eprintln!("[BMP280] {} erreurs consécutives — réinitialisation ({:?})",
-                                  erreurs_consecutives, e);
+                        log::warn!(target: "baro", "BMP280 : {} erreurs consécutives — réinitialisation ({:?})",
+                                   erreurs_consecutives, e);
                         std::thread::sleep(Duration::from_millis(backoff_ms));
                         backoff_ms = (backoff_ms * BACKOFF_FACTEUR).min(BACKOFF_MAX_MS);
                         cpt_reinit.fetch_add(1, Ordering::Relaxed);
@@ -357,12 +405,12 @@ fn thread_vl53l0x<B: crate::hal::BusI2c + 'static>(
                 cpt_reinit.fetch_add(1, Ordering::Relaxed);
                 let _ = tx.send(MesureTelem { distance_mm: None, valide: false, erreurs_consecutives: nb_reinit });
                 if nb_reinit >= REINIT_MAX {
-                    eprintln!("[VL53L0X] ❌ {} réinitialisations sans succès — suspension 30s", nb_reinit);
+                    log::error!(target: "telem", "VL53L0X : {} réinitialisations sans succès — suspension 30s", nb_reinit);
                     std::thread::sleep(Duration::from_secs(30));
                     nb_reinit = 0;
                     backoff_ms = BACKOFF_INITIAL_MS;
                 } else {
-                    eprintln!("[VL53L0X] Init échouée, nouvelle tentative dans {}ms", backoff_ms);
+                    log::warn!(target: "telem", "VL53L0X : init échouée — nouvelle tentative dans {}ms", backoff_ms);
                     std::thread::sleep(Duration::from_millis(backoff_ms));
                     backoff_ms = (backoff_ms * BACKOFF_FACTEUR).min(BACKOFF_MAX_MS);
                 }
@@ -390,13 +438,25 @@ fn thread_vl53l0x<B: crate::hal::BusI2c + 'static>(
                     });
                     // Pas de sleep explicite : le VL53L0X bloque pendant la mesure (~30 ms)
                 }
+                Err(crate::types::ErreursAirHaum::HorsPortee) => {
+                    // Comportement normal : aucun obstacle dans la portée du capteur.
+                    // Le matériel fonctionne correctement — on ne compte pas cela
+                    // comme une erreur et on ne déclenche pas de réinitialisation.
+                    erreurs_consecutives = 0;
+                    backoff_ms = BACKOFF_INITIAL_MS;
+                    let _ = tx.send(MesureTelem {
+                        distance_mm: None,
+                        valide: true,
+                        erreurs_consecutives: 0,
+                    });
+                }
                 Err(e) => {
                     erreurs_consecutives += 1;
                     cpt_err.fetch_add(1, Ordering::Relaxed);
                     let _ = tx.send(MesureTelem { distance_mm: None, valide: false, erreurs_consecutives });
                     if erreurs_consecutives >= ERREURS_AVANT_REINIT {
-                        eprintln!("[VL53L0X] {} erreurs consécutives — réinitialisation ({:?})",
-                                  erreurs_consecutives, e);
+                        log::warn!(target: "telem", "VL53L0X : {} erreurs consécutives — réinitialisation ({:?})",
+                                   erreurs_consecutives, e);
                         std::thread::sleep(Duration::from_millis(backoff_ms));
                         backoff_ms = (backoff_ms * BACKOFF_FACTEUR).min(BACKOFF_MAX_MS);
                         cpt_reinit.fetch_add(1, Ordering::Relaxed);
@@ -439,12 +499,12 @@ fn thread_mpu9250<B: crate::hal::BusI2c + 'static>(
                 // try_send : non-bloquant, abandonne si le FIFO est plein
                 let _ = tx.try_send(MesureImu { donnees: None, valide: false, erreurs_consecutives: nb_reinit });
                 if nb_reinit >= REINIT_MAX {
-                    eprintln!("[MPU9250] ❌ {} réinitialisations sans succès — suspension 30s", nb_reinit);
+                    log::error!(target: "imu", "MPU9250 : {} réinitialisations sans succès — suspension 30s", nb_reinit);
                     std::thread::sleep(Duration::from_secs(30));
                     nb_reinit = 0;
                     backoff_ms = BACKOFF_INITIAL_MS;
                 } else {
-                    eprintln!("[MPU9250] Init échouée, nouvelle tentative dans {}ms", backoff_ms);
+                    log::warn!(target: "imu", "MPU9250 : init échouée — nouvelle tentative dans {}ms", backoff_ms);
                     std::thread::sleep(Duration::from_millis(backoff_ms));
                     backoff_ms = (backoff_ms * BACKOFF_FACTEUR).min(BACKOFF_MAX_MS);
                 }
@@ -469,7 +529,7 @@ fn thread_mpu9250<B: crate::hal::BusI2c + 'static>(
                         let afficher = derniere_alerte_fifo
                             .map_or(true, |t| maintenant.duration_since(t) >= Duration::from_secs(5));
                         if afficher {
-                            eprintln!("[MPU9250] ⚠ FIFO plein — mesure abandonnée (consommateur lent ?)");
+                            log::warn!(target: "imu", "MPU9250 : FIFO plein — mesure abandonnée (consommateur lent ?)");
                             derniere_alerte_fifo = Some(maintenant);
                         }
                     }
@@ -480,8 +540,8 @@ fn thread_mpu9250<B: crate::hal::BusI2c + 'static>(
                     cpt_err.fetch_add(1, Ordering::Relaxed);
                     let _ = tx.try_send(MesureImu { donnees: None, valide: false, erreurs_consecutives });
                     if erreurs_consecutives >= ERREURS_AVANT_REINIT {
-                        eprintln!("[MPU9250] {} erreurs consécutives — réinitialisation ({:?})",
-                                  erreurs_consecutives, e);
+                        log::warn!(target: "imu", "MPU9250 : {} erreurs consécutives — réinitialisation ({:?})",
+                                   erreurs_consecutives, e);
                         std::thread::sleep(Duration::from_millis(backoff_ms));
                         backoff_ms = (backoff_ms * BACKOFF_FACTEUR).min(BACKOFF_MAX_MS);
                         cpt_reinit.fetch_add(1, Ordering::Relaxed);
@@ -509,7 +569,7 @@ fn init_bmp280<B: crate::hal::BusI2c + 'static>(
 
     let mut bmp = Bmp280::nouveau(Arc::clone(bus));
     bmp.initialiser().map_err(|e| {
-        eprintln!("[BMP280] Échec initialisation : {:?}", e);
+        log::error!(target: "baro", "BMP280 échec initialisation : {:?}", e);
     })?;
     Ok(bmp)
 }
@@ -524,7 +584,7 @@ fn init_vl53l0x<B: crate::hal::BusI2c + 'static>(
 
     let mut vl53 = Vl53l0x::nouveau(Arc::clone(bus), ADRESSE_VL53L0X);
     vl53.initialiser().map_err(|e| {
-        eprintln!("[VL53L0X] Échec initialisation : {:?}", e);
+        log::error!(target: "telem", "VL53L0X échec initialisation : {:?}", e);
     })?;
     Ok(vl53)
 }
@@ -539,7 +599,7 @@ fn init_mpu9250<B: crate::hal::BusI2c + 'static>(
 
     let mut mpu = Mpu9250::nouveau(Arc::clone(bus), ADRESSE_MPU9250);
     mpu.initialiser().map_err(|e| {
-        eprintln!("[MPU9250] Échec initialisation : {:?}", e);
+        log::error!(target: "imu", "MPU9250 échec initialisation : {:?}", e);
     })?;
     Ok(mpu)
 }

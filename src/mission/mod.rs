@@ -3,4 +3,5 @@
 //!
 //! Dépend des couches estimation (3) et contrôle (4), à venir.
 
+pub mod armement;
 pub mod etat_machine;

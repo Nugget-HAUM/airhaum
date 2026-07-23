@@ -30,11 +30,13 @@ pub async fn test_capteurs_simultanes(duree_secs: u64) -> crate::types::Result<(
     // Attendre la première mesure de chaque capteur (max 5s)
     let debut_init = Instant::now();
     let mut imu_ok = false;
+    // Extraire rx_imu pour l'utiliser indépendamment de capteurs
+    let mut rx_imu = capteurs.prendre_rx_imu();
     loop {
         let baro_ok  = capteurs.rx_baro.borrow().donnees.is_some();
         let telem_ok = capteurs.rx_telem.borrow().valide;
         // Vider le FIFO IMU pour détecter la première mesure valide
-        while let Ok(m) = capteurs.rx_imu.try_recv() {
+        while let Ok(m) = rx_imu.try_recv() {
             if m.donnees.is_some() { imu_ok = true; }
         }
         if baro_ok && telem_ok && imu_ok { break; }
@@ -69,7 +71,7 @@ pub async fn test_capteurs_simultanes(duree_secs: u64) -> crate::types::Result<(
             Ok(_) = rx_telem.changed() => {
                 if rx_telem.borrow_and_update().valide { n_telem += 1; } else { e_telem += 1; }
             }
-            Some(mesure) = capteurs.rx_imu.recv() => {
+            Some(mesure) = rx_imu.recv() => {
                 if mesure.valide { n_imu += 1; } else { e_imu += 1; }
             }
             _ = tokio::time::sleep(tokio::time::Duration::from_millis(1)) => {}

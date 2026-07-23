@@ -1,3 +1,4 @@
+# /doc/mission.md
 # Mission et machine à états vol — AirHaum II
 
 ## Rôle de la couche mission
@@ -40,6 +41,55 @@ Fréquence d'exécution : 5–10 Hz (voir `doc/gestion_du_temps.md`)
 Condition de sortie de `AutoTest` → `AttenteArmement` : tous les capteurs
 sont en état `Opérationnel` au sens de `EtatCapteur` (voir `doc/initialisation.md`).
 
+---
+
+### Check-liste d'armement
+
+La check-liste d'armement est la **porte de transition** entre `AttenteArmement`
+et `Armement`. Elle est présentée à l'opérateur sous forme d'une console. L'armement ne peut être commandé
+que si tous les items **bloquants** sont au vert ; les items **avertissements**
+peuvent être acquittés explicitement par l'opérateur.
+
+
+#### Items bloquants
+
+| Item | Source | Condition |
+|------|--------|-----------|
+| Calibration gyroscope | `systeme/calibration` | Valide et non expirée |
+| Calibration accéléromètre | `systeme/calibration` | Valide et non expirée |
+| Calibration baromètre | `systeme/calibration` | Valide et non expirée |
+| Estimation active | `taches/taches_estimation` | EKF initialisé, attitude publiée |
+| Plan de vol chargé | `mission/navigation` | Au moins un waypoint défini |
+| Sûreté nominale | `surete/` | FSM sécurité en état `Normal` |
+| Liaison Arduino | `hal/uart` | Port série opérationnel, canal RC valide |
+| Vérification pré-vol | `mission/armement` | Séquence d'activation unitaire des servos (débattements nominaux confirmés) |
+
+
+#### Items avertissements (acquittables)
+
+| Item | Source | Condition nominale |
+|------|--------|--------------------|
+| GPS fix 3D | `taches/taches_gps` | Fix 3D, ≥ 6 satellites, précision H ≤ 5 m |
+| Calibration magnétomètre | `systeme/calibration` | Valide et non expirée |
+
+Le GPS est acquittable pour permettre les vols de test en
+mode attitude sans navigation autonome. La calibration magnétomètre est
+acquittable car le lacet est estimé par gyro seul en l'absence de magnétomètre
+fiable ; le dérapage accumulé reste acceptable pour la phase de test.
+
+
+#### Implémentation
+
+La check-liste est évaluée en temps réel depuis les canaux `watch` existants :
+aucune communication supplémentaire inter-tâches n'est requise. Elle est
+réévaluée à chaque rafraîchissement de l'affichage et reflète l'état
+courant du système.
+
+La commande d'armement n'est rendue disponible que lorsque tous les items
+bloquants sont satisfaits et que les avertissements actifs ont été acquittés.
+
+---
+
 #### Décollage
 
 | État              | Rôle |
@@ -54,6 +104,7 @@ un roulage autonome jusqu'en bout de piste avant mise en puissance.
 La rotation n'est pas un état distinct — c'est une logique interne au
 contrôleur d'attitude déclenchée par la vitesse sol.
 
+
 #### Croisière
 
 | État               | Rôle |
@@ -61,6 +112,7 @@ contrôleur d'attitude déclenchée par la vitesse sol.
 | `VolLigneDroite`   | Cap constant, altitude constante, sans waypoint actif |
 | `Navigation`       | Suivi de waypoints, corrections de cap automatiques |
 | `AttenteEnCercle`  | Loiter : maintien de position en orbite (attente atterrissage, perte liaison…) |
+
 
 #### Atterrissage
 
@@ -73,6 +125,7 @@ contrôleur d'attitude déclenchée par la vitesse sol.
 
 Note VL53L0X : portée utile ~2 m, suffisante pour déclencher le flare.
 La phase `Arrondi` est l'état le plus critique de la FSM.
+
 
 #### Fin de mission
 
@@ -133,6 +186,7 @@ Ces transitions sont sous le contrôle exclusif de la FSM sécurité
 | Fichier                      | Rôle |
 |------------------------------|------|
 | `mission/etat_machine.rs`    | Enum `EtatVol`, logique de transition |
+| `mission/armement.rs`        | Séquence de vérification pré-vol, activation et validation des servos |
 | `mission/decollage.rs`       | Comportements Armement → Montée |
 | `mission/atterrissage.rs`    | Comportements Approche → LandingRoll |
 | `mission/navigation.rs`      | Suivi de waypoints, loiter |

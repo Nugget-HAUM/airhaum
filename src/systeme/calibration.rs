@@ -48,13 +48,13 @@ pub trait CalibrationPersistante: Sized {
     /// Utilisé pour nommer le fichier de calibration.
     /// Ex: "barometre" → calibration_barometre.toml
     fn identifiant_capteur() -> &'static str;
-    
+
     /// Sérialise la calibration en format TOML
     ///
     /// Doit produire un contenu TOML valide avec tous les champs nécessaires
     /// pour reconstruire la calibration via `depuis_toml`.
     fn vers_toml(&self) -> String;
-    
+
     /// Désérialise une calibration depuis un contenu TOML
     ///
     /// # Erreurs
@@ -64,20 +64,47 @@ pub trait CalibrationPersistante: Sized {
     /// - Des champs obligatoires manquent
     /// - Les valeurs sont hors limites
     fn depuis_toml(contenu: &str) -> Result<Self>;
-   
+
     /// Âge de la calibration en secondes depuis sa création (temps réel)
     fn age_secondes(&self) -> u64;
- 
+
+    /// Durée totale de validité de la calibration en secondes.
+    fn duree_validite_secondes(&self) -> u64;
+
+    /// Temps restant avant expiration, en secondes. 0 si déjà expirée.
+    fn temps_restant_secondes(&self) -> u64 {
+        self.duree_validite_secondes().saturating_sub(self.age_secondes())
+    }
+
     /// Vérifie si la calibration est encore valide
     ///
     /// Prend en compte l'âge de la calibration et toute autre contrainte
     /// spécifique au capteur.
     fn est_valide(&self) -> bool;
-    
+
     /// Obtient l'horodatage de la calibration
     ///
     /// Utilisé pour l'affichage et le débogage.
     fn obtenir_horodatage(&self) -> Horodatage;
+}
+
+// ============================================================================
+// État d'une calibration lors de l'inspection
+// ============================================================================
+
+/// Résultat de l'inspection d'une calibration sur le disque.
+///
+/// Contrairement à [`GestionnaireCalibration::charger`] qui retourne `None`
+/// pour les calibrations absentes ET expirées, cette enum les distingue.
+pub enum EtatCalibration<C> {
+    /// Aucun fichier trouvé — le capteur n'a jamais été calibré.
+    Absente,
+    /// Calibration présente et valide.
+    Valide(C),
+    /// Calibration présente mais expirée.
+    Expiree(C),
+    /// Fichier présent mais illisible ou corrompu.
+    Corrompue(String),
 }
 
 /// Gestionnaire centralisé des fichiers de calibration
@@ -154,19 +181,18 @@ impl GestionnaireCalibration {
         let calibration = match C::depuis_toml(&contenu) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("⚠ Calibration {} corrompue: {:?}", C::identifiant_capteur(), e);
+                log::warn!(target: "calibration", "Calibration {} corrompue : {:?}", C::identifiant_capteur(), e);
                 return Ok(None);
             }
         };
         
         // Vérifier la validité
         if calibration.est_valide() {
-            println!("✓ Calibration {} chargée (créée il y a {:.1}s)", 
-                     C::identifiant_capteur(),
-                     calibration.age_secondes() as f32);
+            log::info!(target: "calibration", "Calibration {} chargée (âge {:.0}s)",
+                       C::identifiant_capteur(), calibration.age_secondes() as f32);
             Ok(Some(calibration))
         } else {
-            println!("⚠ Calibration {} expirée, ignorée", C::identifiant_capteur());
+            log::warn!(target: "calibration", "Calibration {} expirée — ignorée", C::identifiant_capteur());
             Ok(None)
         }
     }
@@ -204,11 +230,33 @@ impl GestionnaireCalibration {
                 format!("Écriture calibration {}: {}", C::identifiant_capteur(), e)
             ))?;
         
-        println!("✓ Calibration {} sauvegardée dans {}", 
-                 C::identifiant_capteur(), chemin);
+        log::info!(target: "calibration", "Calibration {} sauvegardée dans {}", C::identifiant_capteur(), chemin);
         Ok(())
     }
     
+    /// Inspecte une calibration sans l'appliquer et sans afficher de messages.
+    ///
+    /// Contrairement à [`charger`], distingue les fichiers absents, expirés
+    /// et corrompus. N'affiche rien — l'appelant gère l'affichage.
+    pub fn inspecter<C: CalibrationPersistante>(&self) -> EtatCalibration<C> {
+        let chemin = self.chemin_fichier(C::identifiant_capteur());
+
+        if !Path::new(&chemin).exists() {
+            return EtatCalibration::Absente;
+        }
+
+        let contenu = match fs::read_to_string(&chemin) {
+            Ok(c) => c,
+            Err(e) => return EtatCalibration::Corrompue(e.to_string()),
+        };
+
+        match C::depuis_toml(&contenu) {
+            Err(e)              => EtatCalibration::Corrompue(format!("{:?}", e)),
+            Ok(c) if c.est_valide() => EtatCalibration::Valide(c),
+            Ok(c)               => EtatCalibration::Expiree(c),
+        }
+    }
+
     /// Supprime une calibration du disque
     ///
     /// Utile pour forcer une recalibration ou nettoyer les anciennes données.
@@ -225,10 +273,9 @@ impl GestionnaireCalibration {
                 .map_err(|e| ErreursAirHaum::ErreurIO(
                     format!("Suppression calibration {}: {}", C::identifiant_capteur(), e)
                 ))?;
-            println!("✓ Calibration {} supprimée", C::identifiant_capteur());
+            log::info!(target: "calibration", "Calibration {} supprimée", C::identifiant_capteur());
         } else {
-            println!("⚠ Calibration {} inexistante, rien à supprimer", 
-                     C::identifiant_capteur());
+            log::debug!(target: "calibration", "Calibration {} inexistante — rien à supprimer", C::identifiant_capteur());
         }
         
         Ok(())
@@ -267,7 +314,7 @@ static GESTIONNAIRE: OnceLock<GestionnaireCalibration> = OnceLock::new();  // �
 ///   Ex: "/home/airhaum/config"
 pub fn initialiser_gestionnaire(chemin_config: &str) {
     GESTIONNAIRE.get_or_init(|| {
-        println!("✓ Gestionnaire de calibration initialisé: {}", chemin_config);
+        log::info!(target: "systeme", "Gestionnaire de calibration initialisé : {}", chemin_config);
         GestionnaireCalibration::nouveau(chemin_config)
     });
 }
@@ -338,14 +385,17 @@ mod tests {
         fn est_valide(&self) -> bool {
             !self.horodatage.est_ecoule(Duration::from_secs(self.validite_sec))
         }
-        
+
         fn obtenir_horodatage(&self) -> Horodatage {
             self.horodatage
         }
 
-        /// Âge de la calibration en secondes depuis sa création (temps réel)
         fn age_secondes(&self) -> u64 {
-          self.horodatage.ecoule().as_secs()
+            self.horodatage.ecoule().as_secs()
+        }
+
+        fn duree_validite_secondes(&self) -> u64 {
+            self.validite_sec
         }
     }
     

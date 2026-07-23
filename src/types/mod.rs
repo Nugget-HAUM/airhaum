@@ -21,16 +21,17 @@ pub mod mesure_frequence;
 // Réexport des types les plus utilisés pour faciliter l'import
 pub use geometrie::{Vector3, Quaternion, Angle};
 pub use messages::{
-    DonneesCapteur, 
-    DonneesBarometre,     
-    DonneesGps,           
-    DonneesImu,           
-    DonneesTelemetre,     
-    MessageSysteme, 
+    DonneesCapteur,
+    DonneesBarometre,
+    DonneesGps,
+    TypeFixGps,
+    DonneesImu,
+    DonneesTelemetre,
+    MessageSysteme,
     Horodatage,
-    Temperature,          
-    Pression,             
-    Distance,             
+    Temperature,
+    Pression,
+    Distance,
 };
 pub use erreurs::{ErreursAirHaum, Result};
 pub use constantes::*;  // Exporte toutes les constantes

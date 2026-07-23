@@ -34,8 +34,6 @@ const VITESSE_ROTATION_MS: f32 = 15.0;
 /// Correspond à ~1,5 m, dans la portée utile du capteur (~2 m).
 const HAUTEUR_FLARE_MM: u16 = 1_500;
 
-/// Vitesse sol en dessous de laquelle l'appareil est considéré à l'arrêt (m/s).
-const VITESSE_ARRET_MS: f32 = 0.5;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // États
@@ -162,8 +160,9 @@ pub struct ContexteVol {
     pub altitude_cible_m: f32,
     /// Hauteur sol mesurée par le VL53L0X (mm). `None` si hors portée (~2 m).
     pub hauteur_sol_mm: Option<u16>,
-    /// Tous les capteurs critiques sont en état `Opérationnel`.
-    pub capteurs_prets: bool,
+    /// Le thread d'estimation est actif et a produit au moins une attitude valide.
+    /// Requis pour la transition `AutoTest → AttenteArmement`.
+    pub estimation_prete: bool,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -182,6 +181,12 @@ pub enum CommandeVol {
 
     /// Demande d'armement opérateur (AttenteArmement → Armement).
     Armer,
+    /// Demande de désarmement (RoulageAuSol → Desarmement).
+    /// Trois origines possibles :
+    /// - Navigation sol : dernier point atteint, moteur coupé (automatique)
+    /// - Opérateur : via LoRa
+    /// - Télécommande RC : signal capté par l'Arduino Nano (arrêt d'urgence principal)
+    Desarmer,
     /// Demande d'atterrissage opérateur (croisière → Approche).
     Atterrir,
     /// Demande de loiter opérateur (croisière → AttenteEnCercle).
@@ -199,6 +204,9 @@ pub enum CommandeVol {
     DriversInitialises,
     /// Configuration drivers terminée (Initialisation → AutoTest).
     ConfigurationTerminee,
+    /// Reprise rapide détectée : capteurs déjà opérationnels depuis le démarrage
+    /// précédent, autotest implicitement passé (Initialisation → AttenteArmement).
+    RepriseRapide,
     /// Vérifications pré-vol passées, actionneurs opérationnels (Armement → RoulageAuSol).
     ArmementValide,
     /// Position en bout de piste atteinte (RoulageAuSol → CourseDecollage).
@@ -238,7 +246,7 @@ impl MachineEtatVol {
         let nouvel_etat = match &self.etat {
 
             EtatVol::AutoTest => {
-                ctx.capteurs_prets.then_some(EtatVol::AttenteArmement)?
+                ctx.estimation_prete.then_some(EtatVol::AttenteArmement)?
             }
 
             EtatVol::CourseDecollage => {
@@ -256,15 +264,10 @@ impl MachineEtatVol {
                 (h <= HAUTEUR_FLARE_MM).then_some(EtatVol::Arrondi)?
             }
 
-            EtatVol::RoulageAuSol => {
-                let v = ctx.vitesse_sol_ms?;
-                (v <= VITESSE_ARRET_MS).then_some(EtatVol::Desarmement)?
-            }
-
             _ => return None,
         };
 
-        eprintln!("[MAÉ vol] tick : {} → {}", self.etat, nouvel_etat);
+        log::info!(target: "mission", "MAÉ vol tick : {} → {}", self.etat, nouvel_etat);
         self.etat = nouvel_etat.clone();
         Some(nouvel_etat)
     }
@@ -280,9 +283,11 @@ impl MachineEtatVol {
         let nouvel_etat = match (&self.etat, commande) {
 
             // --- Pré-vol ---
-            (Boot,           DriversInitialises)     => Initialisation,
-            (Initialisation, ConfigurationTerminee)  => AutoTest,
-            // AutoTest → AttenteArmement : géré par tick() sur capteurs_prets
+            (Boot,           DriversInitialises)    => Initialisation,
+            (Initialisation, ConfigurationTerminee) => AutoTest,
+            // AutoTest → AttenteArmement : géré par tick() sur estimation_prete
+            // Reprise en vol : bypass de toute la séquence sol → loiter immédiat
+            (Initialisation, RepriseRapide)         => AttenteEnCercle,
 
             // --- Décollage ---
             (AttenteArmement, Armer)                 => Armement,
@@ -305,13 +310,13 @@ impl MachineEtatVol {
             (Approche,        ApprocheStabilisee)    => Final,
             // Final → Arrondi : géré par tick() sur hauteur_sol
             (Arrondi,         ContactSol)            => RoulageAuSol,
-            // RoulageAuSol → Desarmement : géré par tick() sur vitesse_sol
+            (RoulageAuSol,    Desarmer)              => Desarmement,
             (Desarmement,     ActionneursDesarmes)   => SauvegardeDonnees,
 
             _ => return None,
         };
 
-        eprintln!("[MAÉ vol] commande : {} → {}", self.etat, nouvel_etat);
+        log::info!(target: "mission", "MAÉ vol commande : {} → {}", self.etat, nouvel_etat);
         self.etat = nouvel_etat.clone();
         Some(nouvel_etat)
     }
@@ -342,7 +347,7 @@ impl MachineEtatVol {
             return false;
         }
 
-        eprintln!("[MAÉ vol] urgence ({}) : {} → {}", securite, self.etat, cible);
+        log::warn!(target: "mission", "MAÉ vol urgence ({}) : {} → {}", securite, self.etat, cible);
         self.etat = cible;
         true
     }
@@ -366,7 +371,7 @@ mod tests {
             altitude_m: None,
             altitude_cible_m: 100.0,
             hauteur_sol_mm: None,
-            capteurs_prets: false,
+            estimation_prete: false,
         }
     }
 
@@ -384,7 +389,7 @@ mod tests {
     #[test]
     fn autotest_vers_attente_par_tick() {
         let mut mae = mae_en(EtatVol::AutoTest);
-        let ctx = ContexteVol { capteurs_prets: true, ..ctx_vide() };
+        let ctx = ContexteVol { estimation_prete: true, ..ctx_vide() };
         mae.tick(&ctx);
         assert_eq!(*mae.etat(), EtatVol::AttenteArmement);
     }
@@ -433,12 +438,30 @@ mod tests {
         mae.traiter_commande(CommandeVol::ContactSol);
         assert_eq!(*mae.etat(), EtatVol::RoulageAuSol);
 
-        let ctx = ContexteVol { vitesse_sol_ms: Some(0.0), ..ctx_vide() };
-        mae.tick(&ctx);
+        mae.traiter_commande(CommandeVol::Desarmer);
         assert_eq!(*mae.etat(), EtatVol::Desarmement);
 
         mae.traiter_commande(CommandeVol::ActionneursDesarmes);
         assert_eq!(*mae.etat(), EtatVol::SauvegardeDonnees);
+    }
+
+    #[test]
+    fn roulage_decollage_ne_desarme_pas_sur_arret() {
+        let mut mae = mae_en(EtatVol::Armement);
+        mae.traiter_commande(CommandeVol::ArmementValide);
+        assert_eq!(*mae.etat(), EtatVol::RoulageAuSol);
+
+        // tick() avec vitesse = 0 : ne doit rien déclencher (arrêt temporaire entre points)
+        let ctx = ContexteVol { vitesse_sol_ms: Some(0.0), ..ctx_vide() };
+        mae.tick(&ctx);
+        assert_eq!(*mae.etat(), EtatVol::RoulageAuSol);
+    }
+
+    #[test]
+    fn desarmer_depuis_roulage() {
+        let mut mae = mae_en(EtatVol::RoulageAuSol);
+        mae.traiter_commande(CommandeVol::Desarmer);
+        assert_eq!(*mae.etat(), EtatVol::Desarmement);
     }
 
     // --- Commande ignorée hors contexte ---

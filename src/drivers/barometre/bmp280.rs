@@ -282,22 +282,19 @@ fn initialisation_complete(&mut self) -> Result<()> {
         .charger::<CalibrationBarometre>() 
     {
         Ok(Some(calib)) => {
-            // Calibration trouvée et valide
             self.calibration_systeme = Some(calib);
             self.etat = EtatCapteur::nouveau_operationnel();
-            println!("✓ BMP280 opérationnel avec calibration chargée (P_ref={:.1} hPa)", 
-                     calib.obtenir_pression_reference() / 100.0);
+            log::info!(target: "baro", "BMP280 opérationnel — P_ref={:.1} hPa",
+                       calib.obtenir_pression_reference() / 100.0);
         }
         Ok(None) => {
-            // Pas de calibration ou expirée
             self.etat = EtatCapteur::Configure;
-            println!("⚠ BMP280 configuré mais nécessite calibration pré-vol");
+            log::warn!(target: "baro", "BMP280 configuré — calibration pré-vol requise");
         }
         Err(e) => {
-            // Erreur de lecture du fichier (non bloquant)
-            eprintln!("⚠ Erreur chargement calibration BMP280: {:?}", e);
+            log::warn!(target: "baro", "Erreur chargement calibration BMP280 : {:?}", e);
             self.etat = EtatCapteur::Configure;
-            println!("⚠ BMP280 configuré mais nécessite calibration pré-vol");
+            log::warn!(target: "baro", "BMP280 configuré — calibration pré-vol requise");
         }
     }
     
@@ -342,7 +339,7 @@ pub fn calibrer_pression_sol(&mut self, validite_sec: u64) -> Result<()> {
         ));
     }
     
-    println!("🔧 Calibration BMP280 en cours...");
+    log::info!(target: "baro", "Calibration BMP280 en cours");
     
     // Effectuer plusieurs lectures pour moyenner et réduire le bruit
     let nb_lectures = 10;
@@ -372,9 +369,9 @@ pub fn calibrer_pression_sol(&mut self, validite_sec: u64) -> Result<()> {
     // Passer en état Opérationnel
     self.etat = EtatCapteur::nouveau_operationnel();
     
-    println!("✓ BMP280 calibré : P_ref = {:.2} hPa ({:.1} m équivalent)", 
-             pression_moyenne / 100.0,
-             44330.0 * (1.0 - (pression_moyenne / 101325.0_f32).powf(0.1903)));
+    log::info!(target: "baro", "BMP280 calibré — P_ref={:.2} hPa ({:.1} m équivalent)",
+               pression_moyenne / 100.0,
+               44330.0 * (1.0 - (pression_moyenne / 101325.0_f32).powf(0.1903)));
     
     Ok(())
 }
@@ -467,7 +464,7 @@ pub fn invalider_calibration(&mut self) -> Result<()> {
     {
         Ok(_) => {},
         Err(e) => {
-            eprintln!("⚠ Erreur suppression fichier calibration: {:?}", e);
+            log::warn!(target: "baro", "Erreur suppression fichier calibration : {:?}", e);
             // Non bloquant, on continue
         }
     }
@@ -477,7 +474,7 @@ pub fn invalider_calibration(&mut self) -> Result<()> {
         self.etat = EtatCapteur::Configure;
     }
     
-    println!("⚠ Calibration BMP280 invalidée");
+    log::info!(target: "baro", "Calibration BMP280 invalidée");
     Ok(())
 }
 
@@ -581,16 +578,35 @@ impl<I: BusI2c> Barometre for Bmp280<I> {
     fn initialiser(&mut self) -> Result<()> {
         // Tentative de reprise rapide si configuration valide détectée
         if self.detecter_configuration_valide()? {
-            println!("⚡ BMP280: Reprise rapide détectée");
+            log::info!(target: "baro", "BMP280 : reprise rapide");
             self.calibration = Some(Calibration::lire_depuis_capteur(&mut self.i2c)?);
-            // En mode normal, les registres sont mis à jour atomiquement à la fin
-            // de chaque cycle complet — aucune donnée partielle possible.
+
+            // En reprise rapide, une calibration sol a nécessairement eu lieu avant
+            // le restart (sinon detecter_configuration_valide() aurait renvoyé false).
+            // On la recharge depuis la flash. Son absence est une anomalie (corruption,
+            // bug ayant provoqué le crash) — on loggue et on continue : altitude_relative()
+            // échouera explicitement si appelée, lire() reste pleinement fonctionnel.
+            match crate::systeme::calibration::gestionnaire()
+                .charger::<CalibrationBarometre>()
+            {
+                Ok(Some(calib)) => {
+                    self.calibration_systeme = Some(calib);
+                    log::info!(target: "baro", "BMP280 calibration chargée — P_ref={:.1} hPa",
+                               calib.obtenir_pression_reference() / 100.0);
+                }
+                Ok(None) => {
+                    log::warn!(target: "baro", "BMP280 reprise rapide : calibration système absente ou expirée");
+                }
+                Err(e) => {
+                    log::warn!(target: "baro", "BMP280 reprise rapide : erreur chargement calibration : {:?}", e);
+                }
+            }
             self.etat = EtatCapteur::nouveau_operationnel();
             return Ok(());
         }
         
         // Sinon, initialisation complète
-        println!("🔧 BMP280: Initialisation complète");
+        log::info!(target: "baro", "BMP280 : initialisation complète");
         self.initialisation_complete()
     }
 

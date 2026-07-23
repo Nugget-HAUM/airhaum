@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+# Façade de journalisation standard — utilisée par tous les modules
+log    = { version = "0.4", features = ["std"] }
+# Horodatage ISO 8601 pour la boîte noire et le fil de vie
+chrono = "0.4"
+
 # Accès au bus I²C Linux via /dev/i2c-X (ioctl I2C_RDWR, set_slave_address)
 i2cdev = "0.6"
 
@@ -14,4 +19,14 @@ tokio = { version = "1", features = ["full"] }
 # et éviter qu'un capteur défaillant ne monopolise le bus indéfiniment
 libc = "0.2"
 
+# Accès au port série UART Linux pour le GPS (u-blox NEO-M8N sur /dev/ttyS2)
+# default-features = false : supprime les dépendances superflues (CoreFoundation macOS, etc.)
+serialport = { version = "4", default-features = false }
 
+# Accès SPI Linux pour le module LoRa SX1276 (/dev/spidev1.0) — même crate que
+# le prototype OrangePi/SX1276 déjà validé sur matériel réel
+rppal = "0.14"
+
+[[bin]]
+name = "airhaum-test"
+path = "src/bin/airhaum_test/main.rs"

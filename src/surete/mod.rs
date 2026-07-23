@@ -8,14 +8,25 @@
 //! Communication **unidirectionnelle** : sécurité → vol uniquement.
 //! La MAÉ vol ne commande jamais la MAÉ sécurité.
 //!
-//! Implémentation de la boucle : `taches/taches_surete.rs` (à venir).
+//! Implémentation de la boucle : `taches/taches_surete.rs`.
+
+pub mod armement;
+pub mod limites;
+pub mod sante;
+pub mod urgences;
 
 use std::fmt;
 
 /// État courant de la MAÉ sécurité.
 ///
-/// Les états sont ordonnés par criticité croissante. Une fois un état critique
-/// atteint, seule une réinitialisation complète peut revenir à `Normal`.
+/// Les états sont ordonnés par criticité croissante. Un état **critique**
+/// (`est_critique()`) ne se résout jamais instantanément — voir
+/// `surete::urgences::MaeSecurite`, qui applique une hystérésis (plusieurs
+/// cycles sains consécutifs requis) avant de lever le verrou. De plus, si un
+/// incident sérieux (`AlerteMajeure` ou pire) a été détecté à un moment du
+/// vol, le rétablissement plafonne à `AlerteMineure` — jamais un retour
+/// direct à `Normal` — pour signaler durablement qu'il faut écourter le vol
+/// plutôt que reprendre la mission comme si de rien n'était.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum EtatSecurite {
     /// Tous les paramètres dans les limites nominales.

@@ -107,6 +107,8 @@ impl CalibrationPersistante for CalibrationGyro {
     fn age_secondes(&self) -> u64 {
         maintenant_unix().saturating_sub(self.timestamp_unix_sec)
     }
+
+    fn duree_validite_secondes(&self) -> u64 { self.validite_sec }
 }
 
 // ============================================================================
@@ -221,6 +223,8 @@ impl CalibrationPersistante for CalibrationAccel {
     fn age_secondes(&self) -> u64 {
         maintenant_unix().saturating_sub(self.timestamp_unix_sec)
     }
+
+    fn duree_validite_secondes(&self) -> u64 { self.validite_sec }
 }
 
 // ============================================================================
@@ -372,6 +376,8 @@ impl CalibrationPersistante for CalibrationMag {
     fn age_secondes(&self) -> u64 {
         maintenant_unix().saturating_sub(self.timestamp_unix_sec)
     }
+
+    fn duree_validite_secondes(&self) -> u64 { self.validite_sec }
 }
 
 // ============================================================================

@@ -37,36 +37,34 @@ La MAÉ sécurité est **orthogonale** à la MAÉ vol :
 | `AtterrissageUrgence` | Atterrissage immédiat, priorité absolue |
 | `ArretUrgence`        | Coupure immédiate du moteur, puis passage en AtterissageUrgence en planeur |
 
-```
-
 Tout état peut basculer vers `AtterrissageUrgence` sur condition critique.
 
 ---
 
 ## Sources de déclenchement
 
-Exemples: A revoir au moment de l'implémentation
-
-| Source                        | Seuil / condition          | Effet minimal |
-|-------------------------------|----------------------------|---------------|
-| Perte liaison LoRa            | > délai configurable       | `FailSafe` |
-| Capteur IMU dégradé           | `EtatCapteur::Dégradé`     | `AlerteMajeure` |
-| Capteur GPS perdu en croisière| données absentes > 5 s     | `AlerteMajeure` → loiter |
-| Géofence dépassée             | position hors limites       | `AtterrissageUrgence` |
-| Batterie critique             | tension < seuil configurable| `AtterrissageUrgence` |
-| Thread capteur silencieux     | watchdog timeout            | selon criticité |
-| Commande arrêt d'urgence sol  | message LoRa prioritaire    | `AtterrissageUrgence` |
+| Source                                    | Seuil / condition                                  | Effet minimal |
+|--------------------------------------------|-----------------------------------------------------|---------------|
+| Perte liaison LoRa                          | > délai configurable (non câblé — voir `EntreesSecurite::lora_perdue`) | `FailSafe` |
+| Capteur dégradé (baro/télém./IMU/GPS)       | `EtatSante::Degrade` (voir `sante::pire_etat`)       | `AlerteMineure` |
+| Capteur hors service / thread silencieux    | `EtatSante::HorsService` (péremption ou watchdog)    | `AlerteMajeure` |
+| Géofence dépassée                           | position hors limites                                | `AtterrissageUrgence` |
+| Batterie critique                           | tension < seuil configurable (non câblé — pas de capteur v1) | `AtterrissageUrgence` |
+| Commande arrêt d'urgence sol                | console opérateur aujourd'hui (LoRa en seconde source à terme) | `ArretUrgence` |
+| Nano en mode manuel après passage en autopilote | le pilote RC reprend la main (voir `mode_manuel_rc`) | `ArretUrgence` |
 
 Note : la perte GPS en phase de décollage ou atterrissage a une criticité
-différente qu'en croisière. La politique exacte est à affiner par phase de vol.
+différente qu'en croisière. La politique exacte (ex. loiter) est à affiner
+par la couche mission qui consommera `EtatSecurite` — pas encore implémentée.
 
 ---
 
 ## Interaction avec la FSM vol
 
 La FSM vol consulte `EtatSecurite` à chaque itération.
-En cas d'état `FailSafe` ou `AtterrissageUrgence`, elle abandonne son état
-courant et bascule sur le comportement d'urgence correspondant.
+En cas d'état `FailSafe`, `AtterrissageUrgence` ou `ArretUrgence`, elle
+abandonne son état courant et bascule sur le comportement d'urgence
+correspondant.
 
 La FSM vol **ne peut pas ignorer** un état sécurité critique.
 Ce mécanisme est la seule voie de forçage externe des états vol.
