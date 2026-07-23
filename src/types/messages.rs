@@ -131,7 +131,7 @@ impl TypeFixGps {
     }
 }
 
-/// Données GPS (NEO-M8N / u-blox, protocole UBX NAV-PVT + NAV-STATUS).
+/// Données GPS (NEO-M8N / u-blox, protocole UBX NAV-PVT + NAV-STATUS + NAV-DOP).
 #[derive(Debug, Clone, Copy)]
 pub struct DonneesGps {
     pub horodatage: Horodatage,

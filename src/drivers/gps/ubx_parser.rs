@@ -15,6 +15,7 @@
 //! |--------|------|--------------|------------------------------------------|
 //! | 0x01   | 0x07 | NAV-PVT      | Position, vitesse, cap, heure, qualité   |
 //! | 0x01   | 0x03 | NAV-STATUS   | État fix, TTFF                           |
+//! | 0x01   | 0x04 | NAV-DOP      | Dilution of Precision (HDOP, VDOP…)      |
 //!
 //! # Format trame UBX
 //!
@@ -88,6 +89,19 @@ pub struct NavStatus {
     pub msss:     u32, // ms depuis le démarrage
 }
 
+/// NAV-DOP (0x01 / 0x04) — Dilution of Precision.
+#[derive(Debug, Clone, Copy)]
+pub struct NavDop {
+    pub i_tow: u32,
+    pub g_dop: u16,
+    pub p_dop: u16,
+    pub t_dop: u16,
+    pub v_dop: u16,
+    pub h_dop: u16,
+    pub n_dop: u16,
+    pub e_dop: u16,
+}
+
 /// En-tête du dernier message reconnu.
 #[derive(Debug, Clone, Copy)]
 pub struct EnteteMessage {
@@ -113,6 +127,7 @@ pub struct UbxParseur {
     last_entete:     Option<EnteteMessage>,
     last_nav_pvt:    Option<NavPvt>,
     last_nav_status: Option<NavStatus>,
+    last_nav_dop:    Option<NavDop>,
 }
 
 impl UbxParseur {
@@ -129,6 +144,7 @@ impl UbxParseur {
             last_entete:     None,
             last_nav_pvt:    None,
             last_nav_status: None,
+            last_nav_dop:    None,
         }
     }
 
@@ -136,10 +152,11 @@ impl UbxParseur {
     ///
     /// Retourne `true` si une trame complète et valide vient d'être reconnue.
     /// Dans ce cas, les getters [`last_nav_pvt`], [`last_nav_status`],
-    /// et [`last_entete`] sont mis à jour.
+    /// [`last_nav_dop`] et [`last_entete`] sont mis à jour.
     ///
     /// [`last_nav_pvt`]: UbxParseur::last_nav_pvt
     /// [`last_nav_status`]: UbxParseur::last_nav_status
+    /// [`last_nav_dop`]: UbxParseur::last_nav_dop
     /// [`last_entete`]: UbxParseur::last_entete
     pub fn alimenter(&mut self, octet: u8) -> bool {
         match self.etat {
@@ -223,6 +240,7 @@ impl UbxParseur {
                     match (self.classe, self.id) {
                         (0x01, 0x07) => self.parse_nav_pvt(),
                         (0x01, 0x03) => self.parse_nav_status(),
+                        (0x01, 0x04) => self.parse_nav_dop(),
                         _            => {}
                     }
                 }
@@ -235,6 +253,7 @@ impl UbxParseur {
 
     pub fn last_nav_pvt(&self)    -> Option<NavPvt>       { self.last_nav_pvt }
     pub fn last_nav_status(&self) -> Option<NavStatus>    { self.last_nav_status }
+    pub fn last_nav_dop(&self)    -> Option<NavDop>        { self.last_nav_dop }
     pub fn last_entete(&self)     -> Option<EnteteMessage> { self.last_entete }
 
     /// Copie le payload brut du dernier message dans `dest`.
@@ -320,11 +339,33 @@ impl UbxParseur {
             msss:     lire_u32(p, 12).unwrap_or(0),
         });
     }
+
+    /// NAV-DOP (0x01/0x04) — 18 octets.
+    fn parse_nav_dop(&mut self) {
+        if (self.longueur as usize) < 18 { self.last_nav_dop = None; return; }
+        let p = &self.payload;
+        self.last_nav_dop = Some(NavDop {
+            i_tow: lire_u32(p, 0).unwrap_or(0),
+            g_dop: lire_u16(p, 4).unwrap_or(0),
+            p_dop: lire_u16(p, 6).unwrap_or(0),
+            t_dop: lire_u16(p, 8).unwrap_or(0),
+            v_dop: lire_u16(p, 10).unwrap_or(0),
+            h_dop: lire_u16(p, 12).unwrap_or(0),
+            n_dop: lire_u16(p, 14).unwrap_or(0),
+            e_dop: lire_u16(p, 16).unwrap_or(0),
+        });
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers de lecture little-endian (retournent Option pour sécurité)
 // ─────────────────────────────────────────────────────────────────────────────
+
+fn lire_u16(b: &[u8], o: usize) -> Option<u16> {
+    if o + 2 <= b.len() {
+        Some(u16::from_le_bytes(b[o..o+2].try_into().unwrap()))
+    } else { None }
+}
 
 fn lire_u32(b: &[u8], o: usize) -> Option<u32> {
     if o + 4 <= b.len() {
@@ -430,5 +471,17 @@ mod tests {
         assert_eq!(pvt.vel_d, 3_000, "velD");
         assert_eq!(pvt.g_speed, 4_000, "gSpeed");
         assert_eq!(pvt.fix_type, 3);
+    }
+
+    #[test]
+    fn nav_dop_parse() {
+        let mut payload = [0u8; 18];
+        // hDOP @ offset 12 = 120 (= 1.20 avec facteur 0.01)
+        payload[12..14].copy_from_slice(&120u16.to_le_bytes());
+        let trame = trame_ubx(0x01, 0x04, &payload);
+        let mut p = UbxParseur::nouveau();
+        for &b in &trame { p.alimenter(b); }
+        let dop = p.last_nav_dop().expect("NAV-DOP attendu");
+        assert_eq!(dop.h_dop, 120);
     }
 }

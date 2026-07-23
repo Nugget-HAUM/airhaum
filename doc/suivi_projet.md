@@ -99,9 +99,10 @@
   observé le 2026-07-08, résolu par débranchement/rebranchement physique),
   seul un cycle d'alimentation peut le débloquer. De plus, `thread_vl53l0x`
   (`taches_capteurs.rs`) ne distingue pas ce cas d'une erreur I²C transitoire :
-  il boucle indéfiniment (réinit + backoff + suspension 30s) sans jamais
-  remonter d'alerte à la couche sûreté (`surete/sante.rs`, pas encore
-  implémenté). À corriger en deux temps : câbler XSHUT sur une GPIO pour
+  il boucle indéfiniment (réinit + backoff + suspension 30s) sans distinguer
+  ce cas d'une erreur I²C transitoire aux yeux de la couche sûreté
+  (`surete/sante.rs`, implémentée depuis, mais pas encore vérifiée sur ce cas
+  précis). À corriger en deux temps : câbler XSHUT sur une GPIO pour
   permettre un reset matériel logiciel, puis faire remonter l'état
   "capteur irrécupérable" à la sûreté après échec du reset.
 
