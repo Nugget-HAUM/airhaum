@@ -1,27 +1,57 @@
 // src/taches/taches_controle.rs
-//! Tâche Tokio de la couche contrôle (couche 4) — brique minimale.
+//! Tâche Tokio de la couche contrôle (couche 4).
 //!
-//! Ne branche pour l'instant que `controleur_direction_sol` (roulage,
-//! course décollage) : `controleur_roulis`/`controleur_tangage`/`controleur_lacet`
-//! n'existent pas encore, les commandes ailerons/profondeur restent donc au
-//! neutre. Gaz et armement sont figés à zéro/non-armé — `ConsigneGaz` n'est
-//! pas encore défini et la couche mission n'existe pas encore pour les
-//! piloter. Voir `doc/controle.md`.
+//! Branche les quatre contrôleurs d'axe (direction sol, roulis, tangage,
+//! lacet) et le mixeur. La mission (couche 5, à venir) sélectionne la phase
+//! active via [`PhaseControle`] et route ses consignes vers le canal du
+//! contrôleur pertinent — voir `doc/controle.md`, « Arbitrage direction sol
+//! / lacet vol ». `PhaseControle` est volontairement plus pauvre que
+//! `EtatVol` : le contrôle ne lit jamais l'état de la MAE vol.
+//!
+//! Gaz (`ConsigneGaz`, passthrough — pas de PID, voir `doc/controle.md`) et
+//! armement sont pilotés par la mission comme les autres consignes ; par
+//! défaut (aucune consigne reçue), gaz au minimum et non-armé — voir
+//! « Défense en profondeur » ci-dessous.
 //!
 //! # Canaux
 //!
 //! ```text
-//! tache_estimation                  tache_controle                  tache_servo
-//! ────────────────                  ──────────────                  ───────────
-//! EtatNavigation (watch) ──────────▶ ControleurDirectionSol
+//! tache_estimation                       tache_controle                      tache_servo
+//! ────────────────                       ──────────────                      ───────────
+//! EtatNavigation (watch) ───────────────▶ [attitude : lacet/roulis/tangage]
+//! Vector3 (rx_taux_corps, watch) ───────▶ [taux corps : roulis/tangage/lacet]
 //! (mission, à venir)
-//! ConsigneDirectionSol (watch) ────▶ + mixeur ────ConsignesServos (watch)───▶
+//! PhaseControle (watch) ────────────────▶ sélection du/des contrôleur(s) actif(s)
+//! ConsigneDirectionSol (watch) ─────────▶ ControleurDirectionSol ┐
+//! ConsigneRoulis (watch) ───────────────▶ ControleurRoulis       ├─ mixeur ──ConsignesServos (watch)──▶
+//! ConsigneTangage (watch) ──────────────▶ ControleurTangage      │
+//! ConsigneLacet (watch) ────────────────▶ ControleurLacet        ┘
+//! ConsigneGaz (watch) ──────────────────▶ [passthrough] ─────────┤
+//! bool (rx_arme, watch) ────────────────▶ [passthrough] ─────────┘
 //! ```
 //!
-//! `tx_consigne_direction_sol` est possédé par cette tâche (créé par
-//! `lancer_controle`), sur le même principe que `tx_consignes` déjà possédé
-//! par `HandlesServo` — la mission, quand elle existera, en obtiendra un
-//! clone pour y écrire ses consignes.
+//! Les six `tx_consigne_*`/`tx_phase`/`tx_arme` sont possédés par cette
+//! tâche (créés par `lancer_controle`), sur le même principe que
+//! `tx_consignes` déjà possédé par `HandlesServo` — la mission, quand elle
+//! existera, en obtiendra un clone pour y écrire ses consignes.
+//!
+//! # Défense en profondeur : gaz au minimum si non armé
+//!
+//! `mixer()` force déjà le gaz au minimum quand `!arme`, quelle que soit
+//! `ConsigneGaz` (voir `controle/mixeur.rs`) — l'Arduino applique sa propre
+//! garde sur `arme` en aval, mais le mixeur ne doit pas laisser fuiter une
+//! consigne gaz non nulle restée dans le canal `watch` après un
+//! désarmement (plan d'essais, E0.8 : coupure gaz sans délai).
+//!
+//! # Gel des contrôleurs inactifs
+//!
+//! Seul(s) le(s) contrôleur(s) actif(s) selon `PhaseControle` sont mis à
+//! jour (intégrés) à chaque cycle ; les autres sont gelés (pas d'appel à
+//! `mettre_a_jour`, donc pas d'accumulation d'intégrale). À la transition
+//! de phase, les contrôleurs qui viennent de devenir inactifs sont
+//! réinitialisés (`reinitialiser()`) pour repartir sans intégrale emballée
+//! la prochaine fois qu'ils seront sélectionnés — voir `doc/controle.md`,
+//! « Points ouverts ».
 //!
 //! # Fréquences
 //!
@@ -33,19 +63,56 @@
 use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
 use tokio::sync::watch;
 
-use crate::controle::{mixer, CommandesNormalisees, ConsigneDirectionSol, ControleurDirectionSol};
-use crate::drivers::controleur_servo::{ConsignesServos, IMPULSION_MIN_US};
+use crate::controle::{
+    mixer, CommandesNormalisees,
+    ConsigneDirectionSol, ControleurDirectionSol,
+    ConsigneGaz,
+    ConsigneLacet, ControleurLacet,
+    ConsigneRoulis, ControleurRoulis,
+    ConsigneTangage, ControleurTangage,
+};
+use crate::drivers::controleur_servo::ConsignesServos;
 use crate::estimation::EtatNavigation;
-use crate::types::{Angle, Horodatage};
+use crate::types::{Angle, Horodatage, Vector3};
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Handle
+// Phase de vol (point de vue contrôle)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Sélectionne quel(s) contrôleur(s) d'axe sont actifs. Décidée par la
+/// mission (couche 5) à partir de ses propres critères (ex. vitesse > V_rot,
+/// déjà utilisé pour sa transition `CourseDecollage → Montee`, voir
+/// `doc/mission.md`) — volontairement plus pauvre que `EtatVol` : le
+/// contrôle ne lit jamais l'état de la MAE vol (voir `doc/controle.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PhaseControle {
+    /// `RoulageAuSol` / `CourseDecollage` : direction sol active.
+    #[default]
+    Sol,
+    /// `Montee` et au-delà : roulis/tangage/lacet actifs.
+    Vol,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Handle retourné par lancer_controle()
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Handle retourné par [`lancer_controle`].
 pub struct HandlesControle {
+    /// Sélectionne la phase active (mission → contrôle, à venir).
+    pub tx_phase: watch::Sender<PhaseControle>,
     /// Émet la consigne de cap au sol (mission → contrôle, à venir).
     pub tx_consigne_direction_sol: watch::Sender<ConsigneDirectionSol>,
+    /// Émet la consigne de roulis en vol (mission → contrôle, à venir).
+    pub tx_consigne_roulis: watch::Sender<ConsigneRoulis>,
+    /// Émet la consigne de tangage en vol (mission → contrôle, à venir).
+    pub tx_consigne_tangage: watch::Sender<ConsigneTangage>,
+    /// Émet la consigne de taux de lacet en vol (mission → contrôle, à venir).
+    pub tx_consigne_lacet: watch::Sender<ConsigneLacet>,
+    /// Émet la consigne de gaz normalisée [0, 1] (mission → contrôle, à venir).
+    pub tx_consigne_gaz: watch::Sender<ConsigneGaz>,
+    /// Émet l'état armé/désarmé (mission → contrôle, à venir).
+    pub tx_arme: watch::Sender<bool>,
     /// Tâche Tokio — annulable via `arreter()`.
     tache: tokio::task::JoinHandle<()>,
     /// Signal d'arrêt partagé avec la tâche.
@@ -64,55 +131,86 @@ impl HandlesControle {
 // Point d'entrée
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Lance la tâche de contrôle (brique minimale : direction sol uniquement).
+/// Lance la tâche de contrôle.
 ///
 /// - `rx_navigation`     : canal watch cloné depuis `HandlesEstimation`.
+/// - `rx_taux_corps`     : canal watch cloné depuis `HandlesEstimation` (vitesse
+///   angulaire corps, biais retiré).
 /// - `tx_consignes_servo`: canal watch cloné depuis `HandlesServo::tx_consignes`.
-/// - `kp`/`ki`/`kd`/`limite_integrale` : gains du PID de direction sol —
-///   aucune valeur par défaut, à régler à l'essai (voir `doc/controle.md`).
+/// - les quatre contrôleurs sont construits par l'appelant (gains réglés à
+///   l'essai, aucune valeur par défaut — voir `doc/controle.md`).
 ///
 /// Doit être appelé depuis un contexte Tokio (après `#[tokio::main]`).
 pub fn lancer_controle(
     rx_navigation: watch::Receiver<EtatNavigation>,
+    rx_taux_corps: watch::Receiver<Vector3>,
     tx_consignes_servo: watch::Sender<ConsignesServos>,
-    kp: f32,
-    ki: f32,
-    kd: f32,
-    limite_integrale: f32,
+    controleur_direction_sol: ControleurDirectionSol,
+    controleur_roulis: ControleurRoulis,
+    controleur_tangage: ControleurTangage,
+    controleur_lacet: ControleurLacet,
 ) -> HandlesControle {
     let arret = Arc::new(AtomicBool::new(false));
+    let (tx_phase, rx_phase) = watch::channel(PhaseControle::default());
     let (tx_consigne_direction_sol, rx_consigne_direction_sol) = watch::channel(
         ConsigneDirectionSol { cap_cible: Angle::depuis_radians(0.0) }
     );
-
-    let controleur_direction_sol = ControleurDirectionSol::nouveau(kp, ki, kd, limite_integrale);
+    let (tx_consigne_roulis, rx_consigne_roulis) = watch::channel(
+        ConsigneRoulis { roulis_cible: Angle::depuis_radians(0.0) }
+    );
+    let (tx_consigne_tangage, rx_consigne_tangage) = watch::channel(
+        ConsigneTangage { tangage_cible: Angle::depuis_radians(0.0) }
+    );
+    let (tx_consigne_lacet, rx_consigne_lacet) = watch::channel(
+        ConsigneLacet { taux_lacet_cible: 0.0 }
+    );
+    let (tx_consigne_gaz, rx_consigne_gaz) = watch::channel(ConsigneGaz::default());
+    let (tx_arme, rx_arme) = watch::channel(false);
 
     let arret_tache = Arc::clone(&arret);
     let tache = tokio::spawn(async move {
         tache_controle(
-            rx_navigation,
-            rx_consigne_direction_sol,
+            rx_navigation, rx_taux_corps, rx_phase,
+            rx_consigne_direction_sol, rx_consigne_roulis, rx_consigne_tangage, rx_consigne_lacet,
+            rx_consigne_gaz, rx_arme,
             tx_consignes_servo,
-            controleur_direction_sol,
+            controleur_direction_sol, controleur_roulis, controleur_tangage, controleur_lacet,
             arret_tache,
         ).await;
     });
 
-    HandlesControle { tx_consigne_direction_sol, tache, arret }
+    HandlesControle {
+        tx_phase,
+        tx_consigne_direction_sol, tx_consigne_roulis, tx_consigne_tangage, tx_consigne_lacet,
+        tx_consigne_gaz, tx_arme,
+        tache, arret,
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Corps de la tâche
 // ─────────────────────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 async fn tache_controle(
     mut rx_navigation: watch::Receiver<EtatNavigation>,
+    rx_taux_corps: watch::Receiver<Vector3>,
+    rx_phase: watch::Receiver<PhaseControle>,
     rx_consigne_direction_sol: watch::Receiver<ConsigneDirectionSol>,
+    rx_consigne_roulis: watch::Receiver<ConsigneRoulis>,
+    rx_consigne_tangage: watch::Receiver<ConsigneTangage>,
+    rx_consigne_lacet: watch::Receiver<ConsigneLacet>,
+    rx_consigne_gaz: watch::Receiver<ConsigneGaz>,
+    rx_arme: watch::Receiver<bool>,
     tx_consignes_servo: watch::Sender<ConsignesServos>,
     mut controleur_direction_sol: ControleurDirectionSol,
+    mut controleur_roulis: ControleurRoulis,
+    mut controleur_tangage: ControleurTangage,
+    mut controleur_lacet: ControleurLacet,
     arret: Arc<AtomicBool>,
 ) {
     let mut dernier_horodatage: Option<Horodatage> = None;
+    let mut derniere_phase: Option<PhaseControle> = None;
 
     loop {
         if arret.load(Ordering::Relaxed) { break; }
@@ -127,19 +225,58 @@ async fn tache_controle(
                 };
                 dernier_horodatage = Some(nav.horodatage);
 
-                let consigne = *rx_consigne_direction_sol.borrow();
-                let commande_direction = controleur_direction_sol.mettre_a_jour(
-                    &consigne, nav.attitude.lacet, dt,
-                );
+                let phase = *rx_phase.borrow();
 
-                let commandes = CommandesNormalisees {
-                    ailerons:   0.0,
-                    profondeur: 0.0,
-                    direction:  commande_direction,
+                // Gel des contrôleurs inactifs : à la transition de phase,
+                // on réinitialise ceux qui viennent de devenir inactifs
+                // pour repartir sans intégrale emballée (doc/controle.md).
+                if derniere_phase != Some(phase) {
+                    match phase {
+                        PhaseControle::Sol => {
+                            controleur_roulis.reinitialiser();
+                            controleur_tangage.reinitialiser();
+                            controleur_lacet.reinitialiser();
+                        }
+                        PhaseControle::Vol => {
+                            controleur_direction_sol.reinitialiser();
+                        }
+                    }
+                    derniere_phase = Some(phase);
+                }
+
+                let commandes = match phase {
+                    PhaseControle::Sol => {
+                        let consigne = *rx_consigne_direction_sol.borrow();
+                        let direction = controleur_direction_sol.mettre_a_jour(
+                            &consigne, nav.attitude.lacet, dt,
+                        );
+                        CommandesNormalisees { ailerons: 0.0, profondeur: 0.0, direction }
+                    }
+                    PhaseControle::Vol => {
+                        let taux = *rx_taux_corps.borrow();
+
+                        let consigne_roulis = *rx_consigne_roulis.borrow();
+                        let ailerons = controleur_roulis.mettre_a_jour(
+                            &consigne_roulis, nav.attitude.roulis, taux.x, dt,
+                        );
+
+                        let consigne_tangage = *rx_consigne_tangage.borrow();
+                        let profondeur = controleur_tangage.mettre_a_jour(
+                            &consigne_tangage, nav.attitude.tangage, taux.y, dt,
+                        );
+
+                        let consigne_lacet = *rx_consigne_lacet.borrow();
+                        let direction = controleur_lacet.mettre_a_jour(
+                            &consigne_lacet, taux.z, dt,
+                        );
+
+                        CommandesNormalisees { ailerons, profondeur, direction }
+                    }
                 };
-                // Gaz/armement figés tant que la mission ne les pilote pas —
-                // voir la note de brique minimale en tête de fichier.
-                let consignes_servos = mixer(&commandes, IMPULSION_MIN_US, false);
+
+                let consigne_gaz = *rx_consigne_gaz.borrow();
+                let arme = *rx_arme.borrow();
+                let consignes_servos = mixer(&commandes, &consigne_gaz, arme);
                 let _ = tx_consignes_servo.send(consignes_servos);
             }
 
@@ -152,26 +289,40 @@ async fn tache_controle(
 mod tests {
     use super::*;
     use std::time::Duration;
-    use crate::drivers::controleur_servo::IMPULSION_NEUTRE_US;
+    use crate::drivers::controleur_servo::{IMPULSION_MAX_US, IMPULSION_MIN_US, IMPULSION_NEUTRE_US};
 
-    fn lancer_test(kp: f32) -> (
+    fn controleurs_neutres() -> (ControleurDirectionSol, ControleurRoulis, ControleurTangage, ControleurLacet) {
+        (
+            ControleurDirectionSol::nouveau(1.0, 0.0, 0.0, 1.0),
+            ControleurRoulis::nouveau(1.0, 1.0, 0.0, 0.0, 1.0),
+            ControleurTangage::nouveau(1.0, 1.0, 0.0, 0.0, 1.0),
+            ControleurLacet::nouveau(1.0, 0.0, 0.0, 1.0),
+        )
+    }
+
+    fn lancer_test() -> (
         watch::Sender<EtatNavigation>,
+        watch::Sender<Vector3>,
         watch::Receiver<ConsignesServos>,
         HandlesControle,
     ) {
         let (tx_navigation, rx_navigation) = watch::channel(EtatNavigation::nul());
+        let (tx_taux_corps, rx_taux_corps) = watch::channel(Vector3::zero());
         let (tx_consignes_servo, rx_consignes_servo) = watch::channel(ConsignesServos::neutre());
 
-        let handles = lancer_controle(rx_navigation, tx_consignes_servo, kp, 0.0, 0.0, 1.0);
+        let (direction_sol, roulis, tangage, lacet) = controleurs_neutres();
+        let handles = lancer_controle(
+            rx_navigation, rx_taux_corps, tx_consignes_servo,
+            direction_sol, roulis, tangage, lacet,
+        );
 
-        (tx_navigation, rx_consignes_servo, handles)
+        (tx_navigation, tx_taux_corps, rx_consignes_servo, handles)
     }
 
     #[tokio::test]
-    async fn reagit_a_une_erreur_de_cap() {
-        let (tx_navigation, mut rx_consignes_servo, handles) = lancer_test(1.0);
+    async fn phase_sol_par_defaut_reagit_a_une_erreur_de_cap() {
+        let (tx_navigation, _tx_taux_corps, mut rx_consignes_servo, handles) = lancer_test();
 
-        // Consigne par défaut (cap_cible = 0°) inchangée : seul le cap mesuré s'écarte.
         let mut nav = EtatNavigation::nul();
         nav.attitude.lacet = Angle::depuis_degres(10.0);
         tx_navigation.send(nav).unwrap();
@@ -180,13 +331,38 @@ mod tests {
 
         let consignes = rx_consignes_servo.borrow_and_update().clone();
         assert_ne!(consignes.direction, IMPULSION_NEUTRE_US);
+        // Ailerons/profondeur : contrôleurs de vol gelés en phase sol.
+        assert_eq!(consignes.ailerons, IMPULSION_NEUTRE_US);
+        assert_eq!(consignes.profondeur, IMPULSION_NEUTRE_US);
 
         handles.arreter();
     }
 
     #[tokio::test]
-    async fn gaz_et_armement_toujours_figes_en_securite() {
-        let (tx_navigation, mut rx_consignes_servo, handles) = lancer_test(1.0);
+    async fn phase_vol_pilote_ailerons_profondeur_et_direction() {
+        let (tx_navigation, _tx_taux_corps, mut rx_consignes_servo, handles) = lancer_test();
+
+        handles.tx_phase.send(PhaseControle::Vol).unwrap();
+        handles.tx_consigne_roulis.send(ConsigneRoulis { roulis_cible: Angle::depuis_degres(0.0) }).unwrap();
+        handles.tx_consigne_tangage.send(ConsigneTangage { tangage_cible: Angle::depuis_degres(0.0) }).unwrap();
+
+        let mut nav = EtatNavigation::nul();
+        nav.attitude.roulis = Angle::depuis_degres(10.0);
+        nav.attitude.tangage = Angle::depuis_degres(-10.0);
+        tx_navigation.send(nav).unwrap();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let consignes = rx_consignes_servo.borrow_and_update().clone();
+        assert_ne!(consignes.ailerons, IMPULSION_NEUTRE_US);
+        assert_ne!(consignes.profondeur, IMPULSION_NEUTRE_US);
+
+        handles.arreter();
+    }
+
+    #[tokio::test]
+    async fn gaz_et_armement_au_minimum_par_defaut() {
+        let (tx_navigation, _tx_taux_corps, mut rx_consignes_servo, handles) = lancer_test();
 
         let mut nav = EtatNavigation::nul();
         nav.attitude.lacet = Angle::depuis_degres(45.0);
@@ -197,21 +373,82 @@ mod tests {
         let consignes = rx_consignes_servo.borrow_and_update().clone();
         assert_eq!(consignes.gaz, IMPULSION_MIN_US);
         assert!(!consignes.arme);
-        // Ailerons/profondeur : pas encore de contrôleur, doivent rester au neutre.
-        assert_eq!(consignes.ailerons, IMPULSION_NEUTRE_US);
-        assert_eq!(consignes.profondeur, IMPULSION_NEUTRE_US);
+
+        handles.arreter();
+    }
+
+    #[tokio::test]
+    async fn gaz_suit_la_consigne_une_fois_arme() {
+        let (tx_navigation, _tx_taux_corps, mut rx_consignes_servo, handles) = lancer_test();
+
+        handles.tx_arme.send(true).unwrap();
+        handles.tx_consigne_gaz.send(ConsigneGaz { gaz: 1.0 }).unwrap();
+        tx_navigation.send(EtatNavigation::nul()).unwrap();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let consignes = rx_consignes_servo.borrow_and_update().clone();
+        assert_eq!(consignes.gaz, IMPULSION_MAX_US);
+        assert!(consignes.arme);
+
+        handles.arreter();
+    }
+
+    #[tokio::test]
+    async fn gaz_force_au_minimum_si_non_arme_malgre_consigne_non_nulle() {
+        // Défense en profondeur (voir doc/controle.md et E0.8 du plan d'essais).
+        let (tx_navigation, _tx_taux_corps, mut rx_consignes_servo, handles) = lancer_test();
+
+        handles.tx_consigne_gaz.send(ConsigneGaz { gaz: 1.0 }).unwrap();
+        // tx_arme jamais envoyé : reste à sa valeur par défaut (false).
+        tx_navigation.send(EtatNavigation::nul()).unwrap();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let consignes = rx_consignes_servo.borrow_and_update().clone();
+        assert_eq!(consignes.gaz, IMPULSION_MIN_US);
+        assert!(!consignes.arme);
 
         handles.arreter();
     }
 
     #[tokio::test]
     async fn aucune_commande_quand_cap_deja_atteint() {
-        let (tx_navigation, mut rx_consignes_servo, handles) = lancer_test(1.0);
+        let (tx_navigation, _tx_taux_corps, mut rx_consignes_servo, handles) = lancer_test();
 
         let mut nav = EtatNavigation::nul();
         nav.attitude.lacet = Angle::depuis_degres(0.0); // égal à la consigne par défaut
         tx_navigation.send(nav).unwrap();
 
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let consignes = rx_consignes_servo.borrow_and_update().clone();
+        assert_eq!(consignes.direction, IMPULSION_NEUTRE_US);
+
+        handles.arreter();
+    }
+
+    #[tokio::test]
+    async fn changement_de_phase_gele_et_reinitialise_le_controleur_devenu_inactif() {
+        let (tx_navigation, _tx_taux_corps, mut rx_consignes_servo, handles) = lancer_test();
+
+        // Phase sol : on fait accumuler de l'intégrale au contrôleur direction sol.
+        let mut nav = EtatNavigation::nul();
+        nav.attitude.lacet = Angle::depuis_degres(45.0);
+        tx_navigation.send(nav).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Bascule en phase vol : direction sol doit être gelé (et réinitialisé).
+        handles.tx_phase.send(PhaseControle::Vol).unwrap();
+        tx_navigation.send(nav).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Retour en phase sol, cap déjà atteint : si l'intégrale n'avait pas
+        // été purgée, la commande direction resterait non nulle.
+        handles.tx_phase.send(PhaseControle::Sol).unwrap();
+        let mut nav_atteint = EtatNavigation::nul();
+        nav_atteint.attitude.lacet = Angle::depuis_degres(0.0);
+        tx_navigation.send(nav_atteint).unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         let consignes = rx_consignes_servo.borrow_and_update().clone();

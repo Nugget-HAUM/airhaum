@@ -111,13 +111,13 @@ airhaum/
 │   │   ├── mod.rs                        # ok
 │   │   ├── pid.rs                        # ok: PID générique (limitation de l'intégrale)
 │   │   ├── controleur_direction_sol.rs   # ok: Cap au sol (roulage, course décollage)
-│   │   ├── controleur_roulis.rs          # A FAIRE: Roulis en vol, cascade angle→taux
-│   │   ├── controleur_tangage.rs         # A FAIRE: Tangage en vol, cascade angle→taux
-│   │   ├── controleur_lacet.rs           # A FAIRE: Coordination de virage en vol
+│   │   ├── controleur_roulis.rs          # ok: Roulis en vol, cascade angle→taux
+│   │   ├── controleur_tangage.rs         # ok: Tangage en vol, cascade angle→taux
+│   │   ├── controleur_lacet.rs           # ok: Coordination de virage en vol (amortissement du dérapage, PID de taux)
 │   │   ├── controleur_altitude.rs        # A FAIRE (hors périmètre actuel)
 │   │   ├── controleur_position.rs        # A FAIRE (hors périmètre actuel)
 │   │   ├── controleur_vitesse.rs         # A FAIRE (hors périmètre actuel)
-│   │   └── mixeur.rs                     # ok: Commandes normalisées → ConsignesServos
+│   │   └── mixeur.rs                     # ok: Commandes normalisées + ConsigneGaz → ConsignesServos
 │   │
 │   ├── mission/                    # ok (partiel): Couche 5: Mission
 │   │   ├── mod.rs                  # ok
@@ -171,7 +171,7 @@ airhaum/
 │       ├── taches_estimation.rs    # ok: Tâche Tokio EKF navigation
 │       ├── taches_gps.rs           # ok: Tâche Tokio lecture GPS UART
 │       ├── taches_servo.rs         # ok: Thread liaison Arduino (envoi consignes / lecture état)
-│       ├── taches_controle.rs      # ok (partiel): direction sol uniquement, voir doc/controle.md
+│       ├── taches_controle.rs      # ok: direction sol + roulis/tangage/lacet, PhaseControle, voir doc/controle.md
 │       ├── taches_mission.rs       # A FAIRE
 │       ├── taches_communication.rs # A FAIRE
 │       ├── taches_surete.rs        # A FAIRE

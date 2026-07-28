@@ -44,10 +44,10 @@ croissante → décollage → vol rasant en ligne droite → virages → ...) :
 | 1 | [x] | `pid.rs` | PID générique réutilisé par tous les contrôleurs | — |
 | 2 | [x] | `mixeur.rs` | Commandes normalisées → `ConsignesServos` (µs) | testable dès la brique 1 |
 | 3 | [x] | `controleur_direction_sol.rs` | Cap au sol → commande direction (roulage, course décollage) | `pid.rs` |
-| 4 | [x] | `taches_controle.rs` (minimal) | Branchement direction sol + mixeur : premier essai de roulage possible | 1-3 |
-| 5 | [ ] | `controleur_roulis.rs` | Roulis → commande ailerons (cascade angle→taux) | `pid.rs` |
-| 6 | [ ] | `controleur_tangage.rs` | Tangage → commande profondeur (cascade angle→taux) | `pid.rs` |
-| 7 | [ ] | `controleur_lacet.rs` | Coordination de virage en vol → commande direction | `pid.rs` — après validation du vol rasant en ligne droite |
+| 4 | [x] | `taches_controle.rs` | Branchement complet (direction sol, roulis, tangage, lacet, gaz) + mixeur, arbitrage `PhaseControle` (mission → contrôle, à venir) | 1, 2, 3, 5, 6, 7 |
+| 5 | [x] | `controleur_roulis.rs` | Roulis → commande ailerons (cascade angle→taux) | `pid.rs` |
+| 6 | [x] | `controleur_tangage.rs` | Tangage → commande profondeur (cascade angle→taux) | `pid.rs` |
+| 7 | [x] | `controleur_lacet.rs` | Coordination de virage en vol → commande direction | `pid.rs` — après validation du vol rasant en ligne droite |
 | — | [ ] | `controleur_altitude.rs`, `controleur_vitesse.rs`, `controleur_position.rs` | Hors périmètre tant que non nécessaires (navigation autonome) | — |
 
 ---
@@ -84,7 +84,9 @@ internes, pas un simple PID sur l'angle :
 **Source du taux mesuré** : gyro traité par `traitement_imu.rs` (repère
 corps, biais statique retiré), corrigé du biais dynamique estimé par
 l'EKF navigation (`EtatNavigation.biais_gyro`). Pas de nouveau flux
-capteur.
+capteur : publié comme dérivée de canaux déjà calculés par
+`taches_estimation.rs` (`rx_taux_corps`, `watch::Receiver<Vector3>`, mêmes
+axes x/y/z que le gyroscope : roulis/tangage/lacet).
 
 ### `controleur_roulis.rs`
 
@@ -97,13 +99,29 @@ Sortie : commande ailerons normalisée [-1, 1].
 Consigne : `ConsigneTangage { tangage_cible: Angle }`.
 Sortie : commande profondeur normalisée [-1, 1].
 
-### `controleur_lacet.rs`
+---
 
-Rôle : coordination de virage en vol (amortissement du dérapage), pas un
-simple asservissement de cap — interface précise à définir lors de cette
-brique (après validation du vol rasant en ligne droite, donc pas
-prioritaire).
+## Contrôleur de lacet en vol — `controleur_lacet.rs`
+
+Rôle : coordination de virage (amortissement du dérapage). **Pas de cascade
+angle → taux** contrairement à `controleur_roulis.rs`/`controleur_tangage.rs` :
+`EtatNavigation.attitude.lacet` est estimé par intégration gyro seule et
+dérive sans borne sur la durée d'un vol (pas de magnétomètre ni de cap GPS
+fusionnés) — l'asservir directement reviendrait à asservir sur du bruit.
+Seul le **taux** de lacet (gyroscope, fiable à court terme) est utilisé,
+via un PID simple.
+
+Consigne : `ConsigneLacet { taux_lacet_cible: f32 }` (rad/s, pas un cap).
 Sortie : commande direction normalisée [-1, 1].
+
+**Interface tranchée lors de cette brique** : une coordination de virage
+complète (taux cible = g·tan(roulis)/vitesse air) nécessiterait une vitesse
+air fiable, absente du catalogue matériel — la vitesse sol GPS a été
+écartée comme substitut (trop bruitée/en retard, diverge de la vitesse air
+avec du vent). `taux_lacet_cible` est donc fourni tel quel par l'appelant :
+`0.0` pour un amortissement pur du dérapage (valeur envisagée pour cette
+itération), avec la possibilité d'un feedforward ultérieur si une vitesse
+air fiable devient disponible (tube Pitot).
 
 ---
 
@@ -124,7 +142,7 @@ faits par la mission, voir ci-dessous — pas par le contrôle).
 
 ---
 
-## Arbitrage direction sol / lacet vol
+## Arbitrage direction sol / lacet vol — `PhaseControle`
 
 Le contrôle ne lit jamais `EtatVol` (couche 5) — cohérent avec la
 communication strictement descendante mission → contrôle (même principe
@@ -132,11 +150,25 @@ que sûreté → vol, `doc/surete.md`).
 
 C'est la **mission** qui décide de la phase (avec le critère
 vitesse > V_rot déjà utilisé pour sa propre transition
-`CourseDecollage → Montee`, voir `doc/mission.md`) et qui route sa
-consigne vers le canal `watch` du contrôleur pertinent :
+`CourseDecollage → Montee`, voir `doc/mission.md`) et qui la publie via
+`PhaseControle` (`taches_controle.rs`), un type volontairement plus pauvre
+qu'`EtatVol` — seules deux valeurs :
 
-- `RoulageAuSol` / `CourseDecollage` → `ConsigneDirectionSol`
-- `Montee` et au-delà → `ConsigneLacet` (+ `ConsigneRoulis` / `ConsigneTangage`)
+- `PhaseControle::Sol` (`RoulageAuSol` / `CourseDecollage`) → `controleur_direction_sol` actif.
+- `PhaseControle::Vol` (`Montee` et au-delà) → `controleur_roulis` / `controleur_tangage` / `controleur_lacet` actifs.
+
+La mission écrit la phase sur `tx_phase` **et** route sa consigne vers le
+canal `watch` du (des) contrôleur(s) pertinent(s) ; `taches_controle.rs` ne
+fait que lire `PhaseControle` pour savoir quel(s) contrôleur(s) mettre à
+jour à chaque cycle.
+
+**Gel des contrôleurs inactifs** : implémenté — seul(s) le(s) contrôleur(s)
+actif(s) selon `PhaseControle` sont mis à jour (intégrés) ; les autres sont
+gelés (pas d'appel à `mettre_a_jour`, donc pas d'accumulation d'intégrale
+sur une erreur jamais appliquée). À la transition de phase, les
+contrôleurs qui viennent de devenir inactifs sont réinitialisés
+(`reinitialiser()`) pour repartir sans intégrale emballée la prochaine
+fois qu'ils seront sélectionnés.
 
 Le VL53L0X garde son rôle déjà documenté (déclenchement de l'`Arrondi` à
 l'atterrissage, `doc/mission.md`), sans lien avec cet arbitrage.
@@ -154,10 +186,18 @@ wing) → mixage trivial 1:1 par axe, pas de couplage à gérer :
   est actif) → `direction` (µs)
 - conversion : `neutre (1500) + commande * demi_plage`, clamp [1000, 2000]
 
-**Gaz** : hors PID pour l'instant. Consigne transmise telle quelle par la
-mission (`ConsigneGaz`, passthrough direct), pas de régulation asservie
-tant que `controleur_vitesse.rs` / `controleur_altitude.rs` n'existent
-pas.
+**Gaz — `ConsigneGaz { gaz: f32 }`** : hors PID, passthrough direct par la
+mission, pas de régulation asservie tant que `controleur_vitesse.rs` /
+`controleur_altitude.rs` n'existent pas. Normalisée `[0, 1]` comme les
+autres commandes (plutôt qu'exprimée en µs) pour ne pas exposer les
+bornes matérielles du servo à la mission ; conversion dans le mixeur :
+`min (1000) + gaz * plage`, clamp [1000, 2000].
+
+**Défense en profondeur** : si `!arme`, le mixeur force le gaz au minimum
+quelle que soit `ConsigneGaz` — l'Arduino applique déjà sa propre garde
+sur `arme` en aval, mais le mixeur ne doit pas laisser fuiter une
+consigne gaz non nulle restée dans le canal `watch` après un
+désarmement (plan d'essais, E0.8 : coupure gaz sans délai).
 
 ---
 
@@ -199,22 +239,8 @@ Progression jusqu'à ce que le comportement observé corresponde exactement
 
 - Valeurs numériques des gains (Kp/Ki/Kd, bornes IMAX, gain P externe
   angle→taux) — à déterminer/régler à l'essai, aucune valeur a priori.
-- Interface précise de `controleur_lacet.rs` (coordination de virage) —
-  à définir lors de cette brique.
 - Fréquence exacte de `controleur_direction_sol` — probablement 200 Hz
   par simplicité, à confirmer.
-- Format exact de `ConsigneGaz` (pourcentage vs µs direct).
-- **Gel des contrôleurs inactifs (`taches_controle.rs`)** : si
-  `controleur_direction_sol` et `controleur_lacet` (ou plus généralement
-  tout contrôleur non sélectionné par la phase mission courante)
-  continuent de tourner en arrière-plan sans que leur sortie soit
-  utilisée, leur terme intégral accumule une erreur jamais appliquée —
-  au changement de phase, le contrôleur repart avec une intégrale déjà
-  emballée et produit un à-coup. `taches_controle.rs` devra ne mettre à jour
-  (intégrer) que le contrôleur dont le canal de consigne est
-  actuellement alimenté par la mission, et geler les autres. À traiter
-  lors de l'écriture de cette brique, pas avant.
-
 ---
 
 ## Modules associés
@@ -225,6 +251,7 @@ Progression jusqu'à ce que le comportement observé corresponde exactement
 | `controle/controleur_direction_sol.rs`   | Cap au sol (roulage, course décollage) |
 | `controle/controleur_roulis.rs`          | Roulis en vol, cascade angle→taux |
 | `controle/controleur_tangage.rs`         | Tangage en vol, cascade angle→taux |
-| `controle/controleur_lacet.rs`           | Coordination de virage en vol |
-| `controle/mixeur.rs`                     | Commandes normalisées → `ConsignesServos` |
-| `taches/taches_controle.rs`              | Tâche Tokio, boucle contrôle, branchement consignes/mixeur |
+| `controle/controleur_lacet.rs`           | Coordination de virage en vol (amortissement du dérapage, PID de taux) |
+| `controle/mixeur.rs`                     | Commandes normalisées + `ConsigneGaz` → `ConsignesServos`, défense en profondeur si non armé |
+| `taches/taches_controle.rs`              | Tâche Tokio, boucle contrôle, `PhaseControle`, branchement consignes/mixeur, gel des contrôleurs inactifs |
+| `taches/taches_estimation.rs`            | Publie aussi `rx_taux_corps` (`Vector3`, biais retiré) pour la boucle interne des cascades angle→taux |
