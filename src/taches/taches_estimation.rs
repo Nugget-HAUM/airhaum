@@ -13,6 +13,7 @@
 //!  MesureImu (FIFO mpsc) ──[prendre]──▶  TraitementImu
 //!                                        EkfNavigation         ──▶  rx_navigation (watch)
 //!                                                              ──▶  rx_attitude   (watch)
+//!                                                              ──▶  rx_taux_corps (watch)
 //! thread capteur-bmp280
 //! thread capteur-vl53l0x                                       ──▶  rx_altitude   (watch)
 //!  MesureBaro  (watch)  ──[clone]──▶    FusionAltitude
@@ -22,6 +23,11 @@
 //!  MesureGps   (watch)  ──[clone]──▶    TraitementGps
 //!                                        EkfNavigation.corriger_gps
 //! ```
+//!
+//! `rx_taux_corps` : vitesse angulaire corps (rad/s), biais statique
+//! (calibration) et dynamique (`EtatNavigation.biais_gyro`, estimé par
+//! l'EKF) retirés. Consommée par la couche contrôle (`taches_controle.rs`)
+//! pour la boucle interne des cascades angle → taux — voir `doc/controle.md`.
 
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use tokio::sync::{watch, mpsc};
@@ -32,7 +38,7 @@ use crate::capteurs::traitement_gps::TraitementGps;
 use crate::estimation::{Attitude, EkfNavigation, EtatNavigation};
 use crate::taches::taches_capteurs::{MesureBaro, MesureImu, MesureTelem};
 use crate::taches::taches_gps::MesureGps;
-use crate::types::Pression;
+use crate::types::{Pression, Vector3};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Handle retourné par lancer_estimation()
@@ -46,6 +52,8 @@ pub struct HandlesEstimation {
     pub rx_altitude:   watch::Receiver<AltitudeFusionnee>,
     /// État de navigation complet (attitude + position NED + vitesse + biais gyro).
     pub rx_navigation: watch::Receiver<EtatNavigation>,
+    /// Vitesse angulaire corps (rad/s), biais statique et dynamique retirés.
+    pub rx_taux_corps: watch::Receiver<Vector3>,
     /// Tâche Tokio — annulable via `arreter()`.
     tache: tokio::task::JoinHandle<()>,
     /// Signal d'arrêt partagé avec la tâche.
@@ -83,18 +91,19 @@ pub fn lancer_estimation(
     let (tx_attitude,   rx_attitude)   = watch::channel(Attitude::nulle());
     let (tx_altitude,   rx_altitude)   = watch::channel(AltitudeFusionnee::nulle());
     let (tx_navigation, rx_navigation) = watch::channel(EtatNavigation::nul());
+    let (tx_taux_corps, rx_taux_corps) = watch::channel(Vector3::zero());
 
     let arret_tache = Arc::clone(&arret);
     let tache = tokio::spawn(async move {
         tache_estimation(
             rx_imu, rx_baro, rx_telem, rx_gps,
-            tx_attitude, tx_altitude, tx_navigation,
+            tx_attitude, tx_altitude, tx_navigation, tx_taux_corps,
             pression_reference,
             arret_tache,
         ).await;
     });
 
-    HandlesEstimation { rx_attitude, rx_altitude, rx_navigation, tache, arret }
+    HandlesEstimation { rx_attitude, rx_altitude, rx_navigation, rx_taux_corps, tache, arret }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -109,6 +118,7 @@ async fn tache_estimation(
     tx_attitude:   watch::Sender<Attitude>,
     tx_altitude:   watch::Sender<AltitudeFusionnee>,
     tx_navigation: watch::Sender<EtatNavigation>,
+    tx_taux_corps: watch::Sender<Vector3>,
     pression_reference: Pression,
     arret: Arc<AtomicBool>,
 ) {
@@ -135,6 +145,7 @@ async fn tache_estimation(
                             let nav = filtre.etat();
                             let _ = tx_navigation.send(nav);
                             let _ = tx_attitude.send(nav.attitude);
+                            let _ = tx_taux_corps.send(traitee.donnees.gyroscope - nav.biais_gyro);
                         }
                     }
                     None => {

@@ -38,10 +38,17 @@
   d'incident (`deja_degrade_ce_vol`, plafond de rétablissement à `AlerteMineure`)
   et l'arrêt d'urgence console (`arret_urgence_console` dans `airhaum-test`)
   ne peuvent aujourd'hui être effacés qu'en relançant le binaire. Sans
-  conséquence tant que la convention reste 1 vol = 1 lancement du programme.
-  À traiter si cette hypothèse change (plusieurs vols par lancement) : prévoir
-  un point d'entrée explicite (ex. lors du prochain armement) qui appelle
-  `reinitialiser()` et remet `arret_urgence_console` à `false`.
+  conséquence tant que la convention reste 1 vol = 1 lancement du programme —
+  **et qu'un roulage au sol compte comme un vol à part entière** : on relance
+  le programme entre un essai de roulage et le vol qui suit, jamais les deux
+  dans le même lancement. C'est ce qui garantit qu'un incident survenu
+  pendant un roulage (plafond `AlerteMineure`, non bloquant pour
+  `surete::armement::surete_nominale()`) ne peut pas passer inaperçu jusqu'à
+  un armement ultérieur dans la même session programme.
+  À traiter si cette hypothèse change (plusieurs vols — roulages compris —
+  par lancement) : prévoir un point d'entrée explicite (ex. lors du prochain
+  armement) qui appelle `reinitialiser()` et remet `arret_urgence_console` à
+  `false`.
 
 - panic silencieux : Si un thread capteur panique, le mutex peut être empoisonné → erreur I2C → réinit en boucle.
 
@@ -113,6 +120,18 @@
 - [x] **Journalisation** : implémentée dans `src/systeme/journalisation.rs`,
   voir `doc/journalisation.md`. Chemin de sortie configurable via
   `AIRHAUM_LOGS_DIR` (défaut `/home/airhaum/logs`).
+
+- [ ] **Reprise autopilote après prise de main manuelle volontaire (hors urgence)** :
+  aujourd'hui, toute reprise de main manuelle pendant que le système est
+  armé/en mission déclenche `ArretUrgence` (`doc/surete.md`), état dont on
+  ne sort qu'en relançant le programme (voir la note sur
+  `MaeSecurite::reinitialiser()` ci-dessus). Aucun mécanisme ne permet à
+  l'opérateur de rendre la main à l'autopilote après une reprise
+  volontaire non liée à une urgence réelle (ex. évitement ponctuel d'un
+  obstacle), sans redémarrer. À trancher : faut-il distinguer une reprise
+  manuelle "urgence" d'une reprise "volontaire réversible", et si oui
+  comment (nouvelle commande explicite de ré-armement de l'autopilote,
+  distinction au niveau du canal RC, etc.) ?
 
 ---
 

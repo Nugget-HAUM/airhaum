@@ -104,6 +104,12 @@ un roulage autonome jusqu'en bout de piste avant mise en puissance.
 La rotation n'est pas un état distinct — c'est une logique interne au
 contrôleur d'attitude déclenchée par la vitesse sol.
 
+Note abandon : `CourseDecollage` peut revenir à `RoulageAuSol` en cas
+d'abandon normal de la course (décision mission/opérateur, vitesse jugée
+insuffisante) — simple réduction des gaz, pas de nouvel état de
+décélération puisque l'avion n'est pas freiné. Distinct d'un abandon en
+urgence (voir transitions d'urgence ci-dessous).
+
 
 #### Croisière
 
@@ -143,9 +149,10 @@ Boot → Initialisation → AutotTest → AttenteArmement
                                          │ commande armement
                                       Armement
                                          │
-                                    RoulageAuSol ──────┐
-                                         │             │ position atteinte
-                                  CourseDecollage       │
+                                    RoulageAuSol ◄──────────┐
+                                         │ position atteinte│ abandon course
+                                         ▼                  │ (vitesse insuff. /
+                                  CourseDecollage ───────────┘  décision opérateur)
                                          │ vitesse > V_rot
                                        Montee
                                          │ altitude cible

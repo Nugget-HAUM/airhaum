@@ -1,2 +1,5 @@
 # On ignore le dossier du compilateur
 target/
+
+# Données brutes de campagnes de mesure terrain (CSV, gros volumes, pas de valeur en historique git)
+campagnes_mesures/
