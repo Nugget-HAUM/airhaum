@@ -2,6 +2,16 @@
 
 ---
 
+## Processus — fin de brique
+
+Avant de commit un module/brique terminé : relire la checklist "Prochaines
+étapes" ci-dessous et la section correspondante de `doc/architecture.md`
+(statuts fichier par fichier) — pas seulement le doc dédié à la couche
+concernée (ex. `doc/controle.md`). Ces deux fichiers de suivi transverses
+ne se mettent pas à jour tout seuls.
+
+---
+
 ## Prochaines étapes
 
 - [x] Refonte architecturale de la couche capteurs I2C (threads synchrones dédiés)
@@ -17,10 +27,14 @@
         du `ekf.rs` unique prévu initialement, mais même rôle)
 - [x] Calibration — `src/systeme/calibration.rs` + console dédiée `console_calibration.rs`
 - [x] Système de journalisation — voir `doc/journalisation.md`, implémenté et opérationnel
-- [ ] Contrôleur d'attitude
+- [x] **Contrôleur d'attitude** — `src/controle/controleur_roulis.rs`, `controleur_tangage.rs`,
+      `controleur_lacet.rs` (cascade angle→taux, voir `doc/controle.md`)
 - [ ] Contrôleur d'altitude
-- [ ] Couche mission — la MAÉ vol (états/transitions) est faite ; reste la logique
-      de navigation (points de passage, modes de vol) au-dessus
+- [ ] Couche mission — la MAÉ vol (états/transitions) est faite ; `mission/plan_vol.rs`
+      (segments Sol, `doc/plan_de_vol.md`) est fait en logique pure mais **pas câblé** —
+      voir `taches/taches_mission.rs` (A FAIRE) dans `doc/architecture.md`. Reste
+      aussi la logique de navigation (points de passage, modes de vol, phase
+      Vol — E5+) au-dessus
 
 ---
 

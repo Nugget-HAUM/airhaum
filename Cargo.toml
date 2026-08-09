@@ -27,6 +27,12 @@ serialport = { version = "4", default-features = false }
 # le prototype OrangePi/SX1276 déjà validé sur matériel réel
 rppal = "0.14"
 
+# Désérialisation du plan de vol (mission/plan_vol.rs) : format TOML avec
+# listes de segments ([[segment]]) et tables imbriquées (fin = {...}) —
+# hors de portée du parseur maison ligne à ligne de systeme/calibration.rs
+serde = { version = "1", features = ["derive"] }
+toml   = "0.8"
+
 [[bin]]
 name = "airhaum-test"
 path = "src/bin/airhaum_test/main.rs"

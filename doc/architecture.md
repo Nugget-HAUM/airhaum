@@ -122,11 +122,13 @@ airhaum/
 │   ├── mission/                    # ok (partiel): Couche 5: Mission
 │   │   ├── mod.rs                  # ok
 │   │   ├── etat_machine.rs         # ok: Machine à états de vol
+│   │   ├── plan_vol.rs             # ok (logique pure, NON câblé) : Segments (Attente, RoulageCap...), condition de fin, chargement TOML — voir doc/plan_de_vol.md ; câblage → taches_mission.rs (A FAIRE)
 │   │   ├── decollage.rs            # A FAIRE 
 │   │   ├── atterrissage.rs         # A FAIRE
-│   │   ├── navigation.rs           # A FAIRE 
-│   │   ├── geofence.rs             # A FAIRE 
-│   │   └── failsafe.rs             # A FAIRE 
+│   │   └── navigation.rs           # A FAIRE (phase Vol, waypoints — E5+)
+│   │       # geofence.rs / failsafe.rs abandonnés : couverts par
+│   │       # surete/limites.rs (géofence, hystérésis) et
+│   │       # urgences.rs::forcer_urgence (failsafe) — voir doc/surete.md
 │   │
 │   ├── communications/             # ok (partiel): Couche 6: Communication
 │   │   ├── mod.rs                  # ok
@@ -135,12 +137,12 @@ airhaum/
 │   │   ├── commandes.rs            # A FAIRE 
 │   │   └── surveillance_lien.rs    # A FAIRE 
 │   │
-│   ├── surete/                     # ok (partiel)
+│   ├── surete/                     # ok
 │   │   ├── mod.rs                  # ok: EtatSecurite, règles d'armement
-│   │   ├── armement.rs             # A FAIRE
-│   │   ├── limites.rs              # A FAIRE 
-│   │   ├── sante.rs                # A FAIRE
-│   │   └── urgences.rs             # A FAIRE 
+│   │   ├── armement.rs             # ok: Condition "sûreté nominale" pour l'armement
+│   │   ├── limites.rs              # ok: Géofence et enveloppe de vol (logique pure)
+│   │   ├── sante.rs                # ok: Santé capteurs + vivacité des threads
+│   │   └── urgences.rs             # ok: MAÉ sécurité (orthogonale et prioritaire sur la MAÉ vol)
 │   │
 │   ├── systeme/                    # ok (partiel): Couche 7: Services système
 │   │   ├── mod.rs                  # ok
@@ -172,9 +174,9 @@ airhaum/
 │       ├── taches_gps.rs           # ok: Tâche Tokio lecture GPS UART
 │       ├── taches_servo.rs         # ok: Thread liaison Arduino (envoi consignes / lecture état)
 │       ├── taches_controle.rs      # ok: direction sol + roulis/tangage/lacet, PhaseControle, voir doc/controle.md
-│       ├── taches_mission.rs       # A FAIRE
+│       ├── taches_mission.rs       # A FAIRE : câble mission/plan_vol.rs (avancement, minuterie par segment, routage des consignes vers taches_controle.rs) + boucle FSM etat_machine.rs — voir doc/plan_de_vol.md "Points ouverts"
 │       ├── taches_communication.rs # A FAIRE
-│       ├── taches_surete.rs        # A FAIRE
+│       ├── taches_surete.rs        # ok: Tâche Tokio supervision sécurité (poll 10 Hz), voir doc/surete.md
 │       └── taches_systeme.rs       # A FAIRE
 │ 
 ├── tests/                          # ok (partiel)

@@ -545,7 +545,10 @@ Sources de déclenchement sécurité identifiées (`doc/surete.md`) mais sans
 matériel ou logique en place pour l'instant — à intégrer au plan dès
 qu'elles deviennent pertinentes, plutôt qu'à tester prématurément :
 
-- **Géofence** : `mission/geofence.rs` non implémenté.
+- **Géofence** : logique implémentée (`surete/limites.rs`, hystérésis) et
+  testée unitairement, mais pas encore validée par un essai réel — à
+  couvrir dès que la navigation (E5) est en place pour la déclencher en
+  conditions réelles.
 - **Batterie critique** : aucun capteur de tension au catalogue matériel
   v1 (`systeme/energie.rs`).
 - **Arrêt d'urgence et télémétrie via LoRa** : deuxième canal de sécurité

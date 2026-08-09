@@ -59,7 +59,7 @@ peuvent être acquittés explicitement par l'opérateur.
 | Calibration accéléromètre | `systeme/calibration` | Valide et non expirée |
 | Calibration baromètre | `systeme/calibration` | Valide et non expirée |
 | Estimation active | `taches/taches_estimation` | EKF initialisé, attitude publiée |
-| Plan de vol chargé | `mission/navigation` | Au moins un waypoint défini |
+| Plan de vol chargé | `mission/plan_vol` | Au moins un segment défini — voir `doc/plan_de_vol.md` |
 | Sûreté nominale | `surete/` | FSM sécurité en état `Normal` |
 | Liaison Arduino | `hal/uart` | Port série opérationnel, canal RC valide |
 | Vérification pré-vol | `mission/armement` | Séquence d'activation unitaire des servos (débattements nominaux confirmés) |
@@ -193,10 +193,14 @@ Ces transitions sont sous le contrôle exclusif de la FSM sécurité
 | Fichier                      | Rôle |
 |------------------------------|------|
 | `mission/etat_machine.rs`    | Enum `EtatVol`, logique de transition |
+| `mission/plan_vol.rs`        | Segments et conditions de fin — voir `doc/plan_de_vol.md` |
 | `mission/armement.rs`        | Séquence de vérification pré-vol, activation et validation des servos |
 | `mission/decollage.rs`       | Comportements Armement → Montée |
 | `mission/atterrissage.rs`    | Comportements Approche → LandingRoll |
-| `mission/navigation.rs`      | Suivi de waypoints, loiter |
-| `mission/geofence.rs`        | Limites géographiques |
-| `mission/failsafe.rs`        | Comportements dégradés |
+| `mission/navigation.rs`      | Suivi de waypoints, loiter (phase Vol — E5+) |
 | `taches/taches_mission.rs`   | Tâche Tokio, boucle FSM |
+
+`geofence.rs` et `failsafe.rs` ont été abandonnés (vestiges d'une itération
+antérieure) : déjà couverts respectivement par `surete/limites.rs`
+(géofence avec hystérésis) et `urgences.rs::forcer_urgence` (failsafe) —
+voir `doc/surete.md`.
