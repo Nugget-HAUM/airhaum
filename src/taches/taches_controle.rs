@@ -2,11 +2,18 @@
 //! Tâche Tokio de la couche contrôle (couche 4).
 //!
 //! Branche les quatre contrôleurs d'axe (direction sol, roulis, tangage,
-//! lacet) et le mixeur. La mission (couche 5, à venir) sélectionne la phase
-//! active via [`PhaseControle`] et route ses consignes vers le canal du
-//! contrôleur pertinent — voir `doc/controle.md`, « Arbitrage direction sol
-//! / lacet vol ». `PhaseControle` est volontairement plus pauvre que
-//! `EtatVol` : le contrôle ne lit jamais l'état de la MAE vol.
+//! lacet) et le mixeur. La mission (couche 5) sélectionne la phase active
+//! via [`PhaseControle`] et route ses consignes vers le canal du contrôleur
+//! pertinent — voir `doc/controle.md`, « Arbitrage direction sol / lacet
+//! vol ». `PhaseControle` est volontairement plus pauvre que `EtatVol` : le
+//! contrôle ne lit jamais l'état de la MAE vol.
+//!
+//! Branchée dans `src/bin/airhaum_test/main.rs`, lancée dès que ses
+//! dépendances existent (`rx_navigation`/`rx_taux_corps` de l'estimation,
+//! `tx_consignes` du thread servo) — voir `doc/mission.md`, « Tâche mission ».
+//! Gains des quatre contrôleurs provisoires (non réglés à l'essai) — seul
+//! `controleur_direction_sol` est exercé tant que la phase Vol n'est pas
+//! atteinte (E3+, `doc/plan_essais.md`).
 //!
 //! Gaz (`ConsigneGaz`, passthrough — pas de PID, voir `doc/controle.md`) et
 //! armement sont pilotés par la mission comme les autres consignes ; par
@@ -20,7 +27,7 @@
 //! ────────────────                       ──────────────                      ───────────
 //! EtatNavigation (watch) ───────────────▶ [attitude : lacet/roulis/tangage]
 //! Vector3 (rx_taux_corps, watch) ───────▶ [taux corps : roulis/tangage/lacet]
-//! (mission, à venir)
+//! (tache_mission, voir taches_mission.rs)
 //! PhaseControle (watch) ────────────────▶ sélection du/des contrôleur(s) actif(s)
 //! ConsigneDirectionSol (watch) ─────────▶ ControleurDirectionSol ┐
 //! ConsigneRoulis (watch) ───────────────▶ ControleurRoulis       ├─ mixeur ──ConsignesServos (watch)──▶
@@ -32,8 +39,9 @@
 //!
 //! Les six `tx_consigne_*`/`tx_phase`/`tx_arme` sont possédés par cette
 //! tâche (créés par `lancer_controle`), sur le même principe que
-//! `tx_consignes` déjà possédé par `HandlesServo` — la mission, quand elle
-//! existera, en obtiendra un clone pour y écrire ses consignes.
+//! `tx_consignes` déjà possédé par `HandlesServo` — la mission en obtient
+//! un clone (`watch::Sender` est `Clone`) pour y écrire ses consignes, voir
+//! `airhaum_test/main.rs`.
 //!
 //! # Défense en profondeur : gaz au minimum si non armé
 //!
@@ -99,19 +107,19 @@ pub enum PhaseControle {
 
 /// Handle retourné par [`lancer_controle`].
 pub struct HandlesControle {
-    /// Sélectionne la phase active (mission → contrôle, à venir).
+    /// Sélectionne la phase active (`tache_mission` en obtient un clone).
     pub tx_phase: watch::Sender<PhaseControle>,
-    /// Émet la consigne de cap au sol (mission → contrôle, à venir).
+    /// Émet la consigne de cap au sol (`tache_mission` en obtient un clone).
     pub tx_consigne_direction_sol: watch::Sender<ConsigneDirectionSol>,
-    /// Émet la consigne de roulis en vol (mission → contrôle, à venir).
+    /// Émet la consigne de roulis en vol (`tache_mission` en obtient un clone, inutilisé avant la phase Vol).
     pub tx_consigne_roulis: watch::Sender<ConsigneRoulis>,
-    /// Émet la consigne de tangage en vol (mission → contrôle, à venir).
+    /// Émet la consigne de tangage en vol (`tache_mission` en obtient un clone, inutilisé avant la phase Vol).
     pub tx_consigne_tangage: watch::Sender<ConsigneTangage>,
-    /// Émet la consigne de taux de lacet en vol (mission → contrôle, à venir).
+    /// Émet la consigne de taux de lacet en vol (`tache_mission` en obtient un clone, inutilisé avant la phase Vol).
     pub tx_consigne_lacet: watch::Sender<ConsigneLacet>,
-    /// Émet la consigne de gaz normalisée [0, 1] (mission → contrôle, à venir).
+    /// Émet la consigne de gaz normalisée [0, 1] (`tache_mission` en obtient un clone).
     pub tx_consigne_gaz: watch::Sender<ConsigneGaz>,
-    /// Émet l'état armé/désarmé (mission → contrôle, à venir).
+    /// Émet l’état armé/désarmé (`tache_mission` en obtient un clone).
     pub tx_arme: watch::Sender<bool>,
     /// Tâche Tokio — annulable via `arreter()`.
     tache: tokio::task::JoinHandle<()>,

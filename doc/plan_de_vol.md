@@ -155,22 +155,54 @@ struct Segment {
 
 ---
 
-## Points ouverts / à trancher lors de l'implémentation
+## Interface avec `taches_mission.rs`
 
-- Mécanisme de chargement : chemin du fichier, argument CLI ou variable
-  d'environnement (cohérence avec `AIRHAUM_LOGS_DIR`, voir
-  `doc/journalisation.md`).
-- Validation à l'ouverture : un plan de vol invalide (parsing TOML,
-  segment sans condition de fin cohérente) doit bloquer avant l'armement
-  — l'item checklist "Plan de vol chargé" (`doc/mission.md`) est le point
-  d'ancrage naturel, à généraliser au-delà du seul "au moins un waypoint
-  défini".
-- Interface exacte avec `taches/taches_mission.rs` (`A FAIRE`) : qui fait
-  avancer le segment courant, à quelle fréquence, comment la consigne est
-  routée vers les canaux `watch` des contrôleurs.
-- Nom définitif du module et son articulation avec `mission/navigation.rs`
-  (réservé aux segments de phase Vol à base de waypoints, à venir avec
-  E5).
+Tranchée — voir `doc/mission.md`, section « Tâche mission —
+`taches_mission.rs` » pour le détail complet (boucle, ordre des
+opérations, canal de commande console). Résumé :
+
+- `lancer_mission` ne reçoit pas de `PlanDeVol` directement : la tâche est
+  lancée avant que l'opérateur en ait choisi un (voir « Injection du plan
+  de vol », `doc/mission.md`) ; le chargement lui-même
+  (`PlanDeVol::charger`/`depuis_toml`) reste à l'appelant
+  (`console_armement.rs`), même principe que `lancer_controle` qui reçoit
+  des contrôleurs déjà construits.
+- Le plan de vol n'avance et ne publie ses consignes
+  (`ConsigneDirectionSol`/`ConsigneGaz`) que lorsque l'état vol courant
+  est `RoulageAuSol` ou `CourseDecollage`, atteint via l'action opérateur
+  « lancer la mission » (`CommandeVol::ArmementValide`) — en dehors de ces
+  deux états, ce code n'est simplement pas appelé.
+- Fréquence : 10 Hz, alignée sur le reste de la tâche mission.
+
+`mission/navigation.rs` reste le nom réservé aux segments de phase Vol à
+base de waypoints (E5+, hors périmètre de `plan_vol.rs`) — articulation
+déjà actée, voir `doc/architecture.md`.
+
+---
+
+## Chargement du fichier — `console_armement.rs`
+
+Tranché — voir `doc/mission.md`, section « Chargement du plan de vol »,
+pour le détail complet (touche `v`, liste numérotée, résultat reflété dans
+l'item checklist). Résumé :
+
+- Dossier résolu comme pour les logs (même principe que `AIRHAUM_LOGS_DIR`,
+  `doc/journalisation.md`) : variable d'environnement `AIRHAUM_PLANS_DIR`,
+  sinon `/home/airhaum/plans_de_vol` par défaut
+  (`mission/plan_vol::REPERTOIRE_PLANS_DE_VOL_DEFAUT`).
+- Sélection interactive dans la check-liste d'armement — pas d'argument CLI.
+- L'item checklist "Plan de vol chargé" (`doc/mission.md`) reflète
+  directement le résultat de `PlanDeVol::charger` (✓/✗ avec détail),
+  y compris en cas de TOML malformé ou de plan sans segment.
+
+Branchement de `taches_mission.rs` — tranché également, voir
+`doc/mission.md`, « Actions armer/lancer/désarmer » : `lancer_mission` est
+appelée dans `src/bin/airhaum_test/main.rs` (pas encore `airhaum-vol.rs`),
+`Armer`/`ArmementValide`/`Desarmer` déclenchées depuis la check-liste
+d'armement elle-même. `taches_controle.rs` est également branchée (voir
+`doc/controle.md`) : les consignes du plan de vol atteignent réellement
+l'Arduino. Reste hors périmètre : gains des contrôleurs et altitude cible
+réels (valeurs provisoires, à régler à l'essai).
 
 ---
 
@@ -179,5 +211,5 @@ struct Segment {
 | Fichier | Rôle |
 |---------|------|
 | `mission/plan_vol.rs` | Types `Segment`/`ConditionFin`, chargement et parsing TOML |
-| `mission/etat_machine.rs` | FSM vol, consomme le segment courant (voir `doc/mission.md`) |
-| `taches/taches_mission.rs` | Tâche Tokio, avance le plan de vol, route les consignes (`A FAIRE`) |
+| `mission/etat_machine.rs` | FSM vol — son état (`RoulageAuSol`/`CourseDecollage`) conditionne l'exécution du plan de vol, voir `doc/mission.md` |
+| `taches/taches_mission.rs` | Tâche Tokio, avance le plan de vol et route ses consignes selon l'état vol — voir `doc/mission.md` |

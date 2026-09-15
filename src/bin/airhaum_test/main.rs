@@ -23,7 +23,8 @@ mod console_armement;
 mod console_test;
 
 use std::io::{self, Write};
-use airhaum::mission::etat_machine::{MachineEtatVol, CommandeVol, ContexteVol};
+use airhaum::mission::etat_machine::CommandeVol;
+use airhaum::mission::plan_vol::PlanDeVol;
 use airhaum::taches::taches_gps::HandlesGps;
 
 use console_calibration::afficher_bilan_calibrations;
@@ -44,9 +45,7 @@ async fn main() {
         .expect("Impossible d'initialiser la journalisation");
 
     // ── Étape 1 : Initialisation matérielle ──────────────────────────────────
-    let mut mae = MachineEtatVol::nouveau();
     log::info!(target: "systeme", "Lancement AirHaum II v{}", airhaum::VERSION);
-    log::info!(target: "mission", "MAÉ : {}", mae.etat());
 
     airhaum::systeme::calibration::initialiser_gestionnaire("/home/airhaum/config");
 
@@ -69,8 +68,7 @@ async fn main() {
         airhaum::hal::i2c::I2cMock::nouveau()
     ));
 
-    mae.traiter_commande(CommandeVol::DriversInitialises);
-    log::info!(target: "mission", "Bus I²C OK → {}", mae.etat());
+    log::info!(target: "systeme", "Bus I²C OK");
 
     // ── GPS : lancement du thread de réception ────────────────────────────────
     // Lancé tôt pour maximiser les chances d'avoir un fix GPS au moment où
@@ -128,11 +126,11 @@ async fn main() {
     let mut capteurs = airhaum::taches::taches_capteurs::lancer_avec_bus(bus);
 
     if reprise_rapide {
-        mae.traiter_commande(CommandeVol::RepriseRapide);
-        log::info!(target: "mission", "Reprise rapide → {}", mae.etat());
+        // Branchement MAÉ vol non implémenté pour ce chemin — voir
+        // `doc/mission.md` (reprise rapide reste un cas ouvert).
+        log::info!(target: "mission", "Reprise rapide détectée");
     } else {
-        mae.traiter_commande(CommandeVol::ConfigurationTerminee);
-        log::info!(target: "mission", "Threads capteurs lancés → {}", mae.etat());
+        log::info!(target: "mission", "Threads capteurs lancés");
 
         println!("Vérification des capteurs :");
         let debut = std::time::Instant::now();
@@ -197,23 +195,29 @@ async fn main() {
             pression_ref,
         );
 
-        // Attente de la première attitude (timeout 5s)
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            estimation.rx_attitude.changed(),
-        ).await {
-            Ok(Ok(_)) => {
-                mae.tick(&ContexteVol {
-                    estimation_prete: true,
-                    vitesse_sol_ms:   None,
-                    altitude_m:       None,
-                    altitude_cible_m: 100.0,
-                    hauteur_sol_mm:   None,
-                });
-                log::info!(target: "mission", "Estimation active → {}", mae.etat());
-            }
-            _ => log::error!(target: "systeme", "Timeout : thread d'estimation non démarré"),
-        }
+        // ── Contrôle : lancement de la tâche (couche 4) ───────────────────────
+        // Lancée dès que ses dépendances existent (rx_navigation/rx_taux_corps
+        // de l'estimation, tx_consignes du thread servo, tous deux déjà prêts
+        // à ce stade) — même principe que les autres tâches, aucune attente
+        // supplémentaire pour l'opérateur.
+        //
+        // Gains PROVISOIRES, non réglés : « aucune valeur a priori » tant
+        // qu'un essai réel n'a pas eu lieu (doc/controle.md, « Points
+        // ouverts »). Seul `controleur_direction_sol` est exercé pour
+        // l'instant (phase Sol, E0/E1 du plan d'essais) ; roulis/tangage/
+        // lacet ne seront sollicités qu'à partir de la phase Vol (E3+) — leurs
+        // gains n'ont donc aucune conséquence avant cette échéance.
+        let controleur_direction_sol = airhaum::controle::ControleurDirectionSol::nouveau(1.0, 0.0, 0.0, 1.0);
+        let controleur_roulis  = airhaum::controle::ControleurRoulis::nouveau(1.0, 1.0, 0.0, 0.0, 1.0);
+        let controleur_tangage = airhaum::controle::ControleurTangage::nouveau(1.0, 1.0, 0.0, 0.0, 1.0);
+        let controleur_lacet   = airhaum::controle::ControleurLacet::nouveau(1.0, 0.0, 0.0, 1.0);
+
+        let controle = airhaum::taches::taches_controle::lancer_controle(
+            estimation.rx_navigation.clone(),
+            estimation.rx_taux_corps.clone(),
+            servo.tx_consignes.clone(),
+            controleur_direction_sol, controleur_roulis, controleur_tangage, controleur_lacet,
+        );
 
         // ── Sûreté : lancement de la tâche de supervision ─────────────────────
         // LimitesVol::default() désactive géofence/plafond tant que les
@@ -221,6 +225,10 @@ async fn main() {
         //
         // arret_urgence_console : petit plus pour les premiers vols
         // rapprochés (canal de sécurité principal = RC/Nano, voir menu "u").
+        //
+        // Lancée avant l'attente de la première attitude (juste en dessous) :
+        // `estimation.rx_attitude` existe dès la construction de la tâche
+        // d'estimation, pas besoin d'attendre sa première valeur.
         let arret_urgence_console = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let surete = airhaum::taches::taches_surete::lancer_surete(
             capteurs.rx_baro.clone(),
@@ -233,13 +241,57 @@ async fn main() {
             std::sync::Arc::clone(&arret_urgence_console),
         );
 
+        // ── Mission : lancement de la tâche (MAÉ vol + plan de vol) ──────────
+        // Lancée dès que ses dépendances existent (rx_securite, rx_navigation,
+        // rx_altitude ci-dessus) — aucune attente supplémentaire pour
+        // l'opérateur. `DriversInitialises`/`ConfigurationTerminee` sont
+        // envoyées immédiatement : drivers et capteurs sont déjà prêts à ce
+        // stade. `estimation_prête` (AutoTest → AttenteArmement) est ensuite
+        // dérivée en continu par la tâche elle-même depuis `rx_navigation` —
+        // plus besoin d'un tick manuel ponctuel ici. Le plan de vol n'est pas
+        // encore connu (choisi plus bas, dans la check-liste) : voir
+        // `HandlesMission::tx_plan`, `doc/mission.md`. Les quatre canaux
+        // `tx_phase`/`tx_consigne_direction_sol`/`tx_consigne_gaz`/`tx_arme`
+        // sont des clones de ceux de `controle` ci-dessus (`HandlesControle`),
+        // qui en reste le propriétaire — la mission n'obtient qu'un droit
+        // d'écriture, voir `doc/mission.md`.
+        let commande_operateur_segment = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // Provisoire — configuration de mission réelle hors périmètre de
+        // cette brique (voir doc/mission.md).
+        const ALTITUDE_CIBLE_M: f32 = 100.0;
+
+        let handles_mission = airhaum::taches::taches_mission::lancer_mission(
+            surete.rx_securite.clone(),
+            estimation.rx_navigation.clone(),
+            estimation.rx_altitude.clone(),
+            controle.tx_phase.clone(), controle.tx_consigne_direction_sol.clone(),
+            controle.tx_consigne_gaz.clone(), controle.tx_arme.clone(),
+            ALTITUDE_CIBLE_M, std::sync::Arc::clone(&commande_operateur_segment),
+        );
+        let _ = handles_mission.tx_commande.send(CommandeVol::DriversInitialises).await;
+        let _ = handles_mission.tx_commande.send(CommandeVol::ConfigurationTerminee).await;
+
+        // Attente de la première attitude (timeout 5s) — diagnostic seul :
+        // la MAÉ vol dérive elle-même `estimation_prête` en continu.
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            estimation.rx_attitude.changed(),
+        ).await {
+            Ok(Ok(_)) => log::info!(target: "mission", "Estimation active"),
+            _ => log::error!(target: "systeme", "Timeout : thread d'estimation non démarré"),
+        }
+
         // ── Check-liste armement ──────────────────────────────────────────────
         let mut sequence_prevol = airhaum::mission::armement::SequencePrevol::nouvelle();
-        if afficher_checklist_armement(&estimation, gps.as_ref(), &servo, &surete, &mut sequence_prevol) {
+        let mut plan_charge: Option<(String, PlanDeVol)> = None;
+        if afficher_checklist_armement(
+            &estimation, gps.as_ref(), &servo, &surete,
+            &mut sequence_prevol, &mut plan_charge, &handles_mission,
+        ).await {
 
         // ── Menu de test ──────────────────────────────────────────────────────
         loop {
-            afficher_menu(&mae);
+            afficher_menu(&handles_mission.rx_etat_vol.borrow().clone());
 
             let mut choix = String::new();
             io::stdin().read_line(&mut choix).unwrap();
@@ -515,7 +567,10 @@ async fn main() {
                 "n" => afficher_navigation(&mut estimation).await,
                 "h" => afficher_altitude(&mut estimation).await,
                 "c" => {
-                    if !afficher_checklist_armement(&estimation, gps.as_ref(), &servo, &surete, &mut sequence_prevol) {
+                    if !afficher_checklist_armement(
+                        &estimation, gps.as_ref(), &servo, &surete,
+                        &mut sequence_prevol, &mut plan_charge, &handles_mission,
+                    ).await {
                         log::info!(target: "systeme", "Session terminée — arrêt opérateur");
                         println!("\nAu revoir !");
                         break;
@@ -566,6 +621,8 @@ async fn main() {
             println!("\nAu revoir !");
         }
 
+        handles_mission.arreter();
+        controle.arreter();
         estimation.arreter();
         surete.arreter();
     }

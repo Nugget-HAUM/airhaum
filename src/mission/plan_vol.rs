@@ -6,8 +6,8 @@
 //! checklist "Plan de vol chargé" (`doc/mission.md`). Logique pure — ne
 //! sait ni avancer toute seule dans le temps (le temps écoulé dans le
 //! segment courant est fourni par l'appelant, pas mesuré ici) ni router
-//! les consignes vers les canaux `watch` du contrôle : ça reste le rôle de
-//! `taches/taches_mission.rs` (`A FAIRE`).
+//! les consignes vers les canaux `watch` du contrôle : c'est le rôle de
+//! `taches/taches_mission.rs`.
 //!
 //! Portée de cette itération : uniquement les segments de phase Sol
 //! (`attente`, `roulage_cap`) — voir `doc/plan_de_vol.md` pour les
@@ -20,6 +20,19 @@ use serde::Deserialize;
 
 use crate::controle::{ConsigneDirectionSol, ConsigneGaz};
 use crate::types::{Angle, ErreursAirHaum, Result};
+
+/// Répertoire par défaut des fichiers de plan de vol, utilisé si la variable
+/// d'environnement `AIRHAUM_PLANS_DIR` n'est pas définie — même principe que
+/// `REPERTOIRE_LOGS_DEFAUT`/`AIRHAUM_LOGS_DIR` (`systeme/journalisation.rs`).
+pub const REPERTOIRE_PLANS_DE_VOL_DEFAUT: &str = "/home/airhaum/plans_de_vol";
+
+/// Résout le répertoire des plans de vol à utiliser : `AIRHAUM_PLANS_DIR`
+/// si définie, sinon [`REPERTOIRE_PLANS_DE_VOL_DEFAUT`]. Permet de faire
+/// tourner la sélection de plan sur un poste de développement où
+/// `/home/airhaum` n'existe pas.
+pub fn repertoire_plans_de_vol() -> String {
+    std::env::var("AIRHAUM_PLANS_DIR").unwrap_or_else(|_| REPERTOIRE_PLANS_DE_VOL_DEFAUT.to_owned())
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types — miroir de l'esquisse `doc/plan_de_vol.md`
@@ -186,6 +199,13 @@ impl PlanDeVol {
     /// Nombre total de segments du plan.
     pub fn nombre_segments(&self) -> usize {
         self.segments.len()
+    }
+
+    /// Index (0-based) du segment courant — pour affichage/journalisation
+    /// (`taches_mission.rs`), pas utilisé par la logique de progression
+    /// elle-même.
+    pub fn index_courant(&self) -> usize {
+        self.index_courant
     }
 
     /// Le segment courant a-t-il atteint sa condition de fin ?

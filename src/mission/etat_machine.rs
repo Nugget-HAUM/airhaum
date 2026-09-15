@@ -32,7 +32,10 @@ const VITESSE_ROTATION_MS: f32 = 15.0;
 
 /// Hauteur sol maximale pour déclencher le flare (mm, VL53L0X).
 /// Correspond à ~1,5 m, dans la portée utile du capteur (~2 m).
-const HAUTEUR_FLARE_MM: u16 = 1_500;
+/// `u32` pour rester cohérent avec `AltitudeFusionnee.hauteur_sol_mm`
+/// (`capteurs/fusion_altitude.rs`), source de `ContexteVol.hauteur_sol_mm`
+/// — voir `doc/mission.md`, « Origine des champs de ContexteVol ».
+const HAUTEUR_FLARE_MM: u32 = 1_500;
 
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -159,7 +162,7 @@ pub struct ContexteVol {
     /// Altitude de croisière cible (m), issue de la configuration de mission.
     pub altitude_cible_m: f32,
     /// Hauteur sol mesurée par le VL53L0X (mm). `None` si hors portée (~2 m).
-    pub hauteur_sol_mm: Option<u16>,
+    pub hauteur_sol_mm: Option<u32>,
     /// Le thread d'estimation est actif et a produit au moins une attitude valide.
     /// Requis pour la transition `AutoTest → AttenteArmement`.
     pub estimation_prete: bool,
@@ -171,20 +174,30 @@ pub struct ContexteVol {
 
 /// Commandes déclenchant des transitions dans la MAÉ vol.
 ///
-/// Deux origines possibles :
+/// Trois origines possibles :
 /// - **Sol** : reçues via LoRa par la couche communication (à venir)
+/// - **Console** : opérateur local (SSH/Wifi), seule origine réellement
+///   câblée en v1 — voir `doc/mission.md`, « Canal de commande console »
 /// - **Système** : émises par un module interne (contrôleur d'approche, etc.)
 #[derive(Debug, Clone)]
 pub enum CommandeVol {
 
-    // --- Sol (via LoRa) ---
+    // --- Opérateur (Sol via LoRa, ou console locale en v1) ---
 
-    /// Demande d'armement opérateur (AttenteArmement → Armement).
+    /// Demande d'armement opérateur (AttenteArmement → Armement), une fois
+    /// la checklist d'armement complète (`doc/mission.md`).
     Armer,
+    /// Confirmation opérateur « lancer la mission », distincte d'`Armer`
+    /// (Armement → RoulageAuSol) — vocabulaire du plan d'essais
+    /// (`doc/plan_essais.md`, E0.6/E0.7 : « armer, lancer une mission »).
+    /// Rôle : vérifications pré-vol passées, actionneurs opérationnels.
+    /// Classée à tort comme « Système » à l'origine (voir `doc/mission.md`,
+    /// « Deux actions opérateur distinctes »).
+    ArmementValide,
     /// Demande de désarmement (RoulageAuSol → Desarmement).
     /// Trois origines possibles :
     /// - Navigation sol : dernier point atteint, moteur coupé (automatique)
-    /// - Opérateur : via LoRa
+    /// - Opérateur : via LoRa, ou console locale en v1
     /// - Télécommande RC : signal capté par l'Arduino Nano (arrêt d'urgence principal)
     Desarmer,
     /// Demande d'atterrissage opérateur (croisière → Approche).
@@ -207,8 +220,6 @@ pub enum CommandeVol {
     /// Reprise rapide détectée : capteurs déjà opérationnels depuis le démarrage
     /// précédent, autotest implicitement passé (Initialisation → AttenteArmement).
     RepriseRapide,
-    /// Vérifications pré-vol passées, actionneurs opérationnels (Armement → RoulageAuSol).
-    ArmementValide,
     /// Position en bout de piste atteinte (RoulageAuSol → CourseDecollage).
     PositionDecollageAtteinte,
     /// Approche stabilisée sur l'axe, émise par le contrôleur d'approche (Approche → Final).

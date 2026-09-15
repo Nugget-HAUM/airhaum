@@ -122,7 +122,7 @@ airhaum/
 │   ├── mission/                    # ok (partiel): Couche 5: Mission
 │   │   ├── mod.rs                  # ok
 │   │   ├── etat_machine.rs         # ok: Machine à états de vol
-│   │   ├── plan_vol.rs             # ok (logique pure, NON câblé) : Segments (Attente, RoulageCap...), condition de fin, chargement TOML — voir doc/plan_de_vol.md ; câblage → taches_mission.rs (A FAIRE)
+│   │   ├── plan_vol.rs             # ok : Segments (Attente, RoulageCap...), condition de fin, chargement TOML — voir doc/plan_de_vol.md ; câblé par taches_mission.rs
 │   │   ├── decollage.rs            # A FAIRE 
 │   │   ├── atterrissage.rs         # A FAIRE
 │   │   └── navigation.rs           # A FAIRE (phase Vol, waypoints — E5+)
@@ -173,8 +173,8 @@ airhaum/
 │       ├── taches_estimation.rs    # ok: Tâche Tokio EKF navigation
 │       ├── taches_gps.rs           # ok: Tâche Tokio lecture GPS UART
 │       ├── taches_servo.rs         # ok: Thread liaison Arduino (envoi consignes / lecture état)
-│       ├── taches_controle.rs      # ok: direction sol + roulis/tangage/lacet, PhaseControle, voir doc/controle.md
-│       ├── taches_mission.rs       # A FAIRE : câble mission/plan_vol.rs (avancement, minuterie par segment, routage des consignes vers taches_controle.rs) + boucle FSM etat_machine.rs — voir doc/plan_de_vol.md "Points ouverts"
+│       ├── taches_controle.rs      # ok: direction sol + roulis/tangage/lacet, PhaseControle, câblée dans airhaum_test/main.rs (alimentée par taches_mission.rs, gains provisoires), voir doc/controle.md
+│       ├── taches_mission.rs       # ok : câblée dans airhaum_test/main.rs (armer/lancer/désarmer depuis console_armement.rs) — boucle FSM etat_machine.rs (forcer_urgence, tick, commandes console) + exécution du plan de vol (RoulageAuSol/CourseDecollage uniquement, plan injecté via tx_plan) + dérivation PhaseControle/tx_arme — voir doc/mission.md "Tâche mission"
 │       ├── taches_communication.rs # A FAIRE
 │       ├── taches_surete.rs        # ok: Tâche Tokio supervision sécurité (poll 10 Hz), voir doc/surete.md
 │       └── taches_systeme.rs       # A FAIRE

@@ -30,11 +30,25 @@ ne se mettent pas à jour tout seuls.
 - [x] **Contrôleur d'attitude** — `src/controle/controleur_roulis.rs`, `controleur_tangage.rs`,
       `controleur_lacet.rs` (cascade angle→taux, voir `doc/controle.md`)
 - [ ] Contrôleur d'altitude
-- [ ] Couche mission — la MAÉ vol (états/transitions) est faite ; `mission/plan_vol.rs`
-      (segments Sol, `doc/plan_de_vol.md`) est fait en logique pure mais **pas câblé** —
-      voir `taches/taches_mission.rs` (A FAIRE) dans `doc/architecture.md`. Reste
-      aussi la logique de navigation (points de passage, modes de vol, phase
-      Vol — E5+) au-dessus
+- [x] **Tâche mission, câblée** — `src/taches/taches_mission.rs` câble la
+      MAÉ vol (`etat_machine.rs`) et le plan de vol (`plan_vol.rs`, segments
+      Sol) : boucle 10 Hz, canal de commande console (`Armer`/
+      `ArmementValide`/`Desarmer` distincts), dérivation
+      `PhaseControle`/`tx_arme` — voir `doc/mission.md`, section « Tâche
+      mission ». Branchée dans `airhaum_test/main.rs` : plan de vol chargé
+      et sélectionné depuis la check-liste (`console_armement.rs`, dossier
+      `/home/airhaum/plans_de_vol`), armer/lancer/désarmer déclenchés
+      depuis ce même écran (pas le menu de test). Premier test réel (E0.5
+      checklist) mené sur cible (Orange Pi) le 2026-09-01, concluant.
+      `taches_controle.rs` également branchée (`doc/controle.md`) : les
+      consignes de la mission (gaz, cap au sol) atteignent réellement
+      l'Arduino via le mixeur. Reste à faire : test E0.6 complet (mission
+      minimale de bout en bout) sur cible, puis E0.7 (point fixe moteur,
+      débloqué par ce branchement) ; gains des contrôleurs et altitude
+      cible réels (provisoires pour l'instant, `ALTITUDE_CIBLE_M` compris) ;
+      `airhaum-vol.rs` toujours un stub.
+- [ ] Couche mission — reste `decollage.rs`, `atterrissage.rs`, et la logique
+      de navigation (points de passage, modes de vol, phase Vol — E5+) au-dessus
 
 ---
 
@@ -152,8 +166,21 @@ ne se mettent pas à jour tout seuls.
 ## Évolutions matérielles a achever :
 
 - [x] GPS branché sur PI (`/dev/ttyS1`, UART1, 115 200 bauds)
-- [x] Arduino branché sur PI (`/dev/ttyS2`, 57 600 bauds) — liaison testée logiciellement
-- Récepteur RC : câblage individuel PWM (A1–A5) à faire sur le Nano — voir
-  `doc/interface_pi_rc_servos.md` et `doc/recepteur_rc.md` (IBus abandonné)
-- ESC / moteurs (PWM) à relier sur arduino
+- [x] Arduino branché sur PI (`/dev/ttyS2`, 57 600 bauds) — liaison testée
+      informellement, hors série d'essais formelle (`doc/plan_essais.md`)
+- [x] **Firmware Nano codé** — `nano/nano.ino` implémente la lecture RC (5
+      canaux PWM individuels A1–A5 via `nano/RcPwm.h`/`.cpp`, une seule ISR
+      PCINT1), l'arbitrage manuel/autopilote local au Nano (canal SWA), la
+      sortie servos + variateur (D3 ailerons, D5 profondeur, D6 gaz, D9
+      direction), le chien de garde liaison Pi (2 s → gaz coupés, surfaces à
+      plat), la sécurité perte RC (1 s → gaz coupés), et la remontée d'état
+      à 10 Hz (canaux RC, mode actif, gaz appliqué) — voir
+      `doc/interface_pi_rc_servos.md` et `doc/protocole_uart_arduino.md`.
+      Câblé côté Pi : `src/drivers/controleur_servo.rs` +
+      `src/taches/taches_servo.rs`, branchés dans `airhaum_test/main.rs`
+      (`doc/architecture.md`). Reste à faire : câblage physique définitif
+      du récepteur RC et de l'ESC/moteur sur le Nano si non déjà fait, et
+      validation formelle par la série d'essais dédiée
+      (`doc/plan_essais.md`, E0.3 arbitrage, E0.7 point fixe moteur, E0.8–E0.10
+      coupure gaz/perte RC/watchdog liaison).
 

@@ -3,16 +3,20 @@
 
 use std::io::{self, Write};
 use airhaum::mission::armement::{SequencePrevol, SurfaceServo};
-use airhaum::mission::etat_machine::MachineEtatVol;
+use airhaum::mission::etat_machine::EtatVol;
 use airhaum::taches::taches_capteurs::HandlesCapteurs;
 use airhaum::taches::taches_estimation::HandlesEstimation;
 use airhaum::taches::taches_gps::HandlesGps;
 use airhaum::taches::taches_servo::HandlesServo;
 
-pub fn afficher_menu(mae: &MachineEtatVol) {
+/// `etat_vol` : dernier état connu de la MAÉ vol (`HandlesMission::rx_etat_vol`),
+/// affiché à titre indicatif — ce menu de test/débogage ne peut plus la
+/// piloter (armement/désarmement se font depuis la check-liste, voir
+/// `console_armement.rs`).
+pub fn afficher_menu(etat_vol: &EtatVol) {
     println!("\n╔════════════════════════════════════════╗");
     println!("║     AIRHAUM II - Console de Test       ║");
-    println!("║  MAÉ : {:<32}║", format!("{}", mae.etat()));
+    println!("║  MAÉ : {:<32}║", format!("{}", etat_vol));
     println!("╚════════════════════════════════════════╝");
     println!("\nTests disponibles:");
     println!("  1.  BMP280  - Test mesure baromètre");

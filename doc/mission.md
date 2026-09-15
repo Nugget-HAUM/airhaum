@@ -88,6 +88,54 @@ courant du système.
 La commande d'armement n'est rendue disponible que lorsque tous les items
 bloquants sont satisfaits et que les avertissements actifs ont été acquittés.
 
+#### Chargement du plan de vol (`console_armement.rs`)
+
+Item interactif, comme la vérification pré-vol servos (touche `p`) : la
+touche `v` (plan de **v**ol) affiche la liste numérotée des fichiers `.toml`
+du dossier plans de vol ; l'opérateur saisit un chiffre, le fichier
+correspondant est chargé via `PlanDeVol::charger` et le résultat retourné
+à la check-liste (✓ avec le nom du fichier en détail, ou ✗ avec le message
+d'erreur — TOML malformé ou plan sans segment).
+
+Dossier résolu comme pour les logs (`AIRHAUM_LOGS_DIR`,
+`doc/journalisation.md`) : `AIRHAUM_PLANS_DIR` si définie, sinon
+`/home/airhaum/plans_de_vol` (`mission/plan_vol::REPERTOIRE_PLANS_DE_VOL_DEFAUT`).
+
+Un chargement réussi dépose aussi le plan dans `HandlesMission::tx_plan` —
+voir « Injection du plan de vol » plus bas — en plus de l'état local
+affiché par la check-liste.
+
+#### Actions armer/lancer/désarmer (`console_armement.rs`)
+
+Ces trois actions sont déclenchées **depuis l'écran de check-liste
+lui-même**, pas depuis le menu de test/débogage (`console_test.rs`) : ce
+dernier reste un outil de diagnostic, l'opérateur n'a normalement pas
+besoin d'y passer pour mener une mission. Elles apparaissent
+conditionnellement, selon l'état vol courant (`HandlesMission::rx_etat_vol`,
+relu à chaque rafraîchissement de l'écran) :
+
+| Touche | Commande envoyée | Condition d'affichage |
+|--------|-------------------|------------------------|
+| `a` — Armer | `CommandeVol::Armer` | `AttenteArmement`, tous les bloquants au vert et avertissements acquittés |
+| `l` — Lancer la mission | `CommandeVol::ArmementValide` | `Armement` |
+| `d` — Désarmer | `CommandeVol::Desarmer` puis `CommandeVol::ActionneursDesarmes` | `RoulageAuSol` (seul état où `Desarmer` est une transition valide, voir `etat_machine.rs`) |
+
+`ActionneursDesarmes` est documentée comme émise par un module système une
+fois les actionneurs confirmés désactivés — ce module n'existe pas encore
+en v1, donc la console l'envoie directement à la suite de `Desarmer`
+(simplification acceptée, à revoir si une vraie confirmation actionneurs
+est implémentée).
+
+Une fois `SauvegardeDonnées` atteint, la check-liste affiche un message de
+fin et **met fin au programme** — décision actée : un lancement de
+programme correspond à une mission (enchaîner plusieurs missions dans un
+même lancement est un sujet séparé, non traité ici, voir
+`doc/suivi_projet.md`).
+
+Après l'envoi d'une commande, un court délai (jusqu'à 500 ms) est observé
+avant le prochain redessin, le temps que la tâche mission (cycle 10 Hz)
+la traite — voir « Boucle, ordre des opérations » ci-dessous.
+
 ---
 
 #### Décollage
@@ -185,6 +233,136 @@ Boot → Initialisation → AutotTest → AttenteArmement
 
 Ces transitions sont sous le contrôle exclusif de la FSM sécurité
 (voir `doc/surete.md`).
+
+---
+
+## Tâche mission — `taches_mission.rs`
+
+Câble ensemble la MAÉ vol (`etat_machine.rs`) et l'exécution du plan de vol
+(`plan_vol.rs`, `doc/plan_de_vol.md`) — logique pure toutes les deux,
+aucun I/O direct dans ce module-là. Fréquence : 10 Hz, même principe que
+`taches_surete.rs`.
+
+### Boucle, ordre des opérations
+
+À chaque cycle, dans cet ordre :
+
+1. **`forcer_urgence`** sur le dernier `EtatSecurite` reçu (`HandlesSurete::rx_securite`)
+   — priorité absolue, comme documenté dans `etat_machine.rs`.
+2. **Commandes console** : vidange du canal `mpsc<CommandeVol>` (voir
+   ci-dessous), chaque commande passée à `traiter_commande`.
+3. **`tick(&ContexteVol)`** — voir origine des champs ci-dessous.
+4. **Publication de `EtatVol`** sur un nouveau canal `watch` (voir
+   « Diffusion de l'état vol »).
+5. **`PhaseControle`** (`taches_controle.rs`) dérivée de l'état courant via
+   `EtatVol::est_en_vol()` — déjà l'API qui distingue exactement les deux
+   groupes voulus (`Vol` si vrai, `Sol` sinon), pas de nouvelle logique à
+   dupliquer. Republiée chaque cycle sur `tx_phase`.
+6. **Armement (`tx_arme`)** dérivé de l'état courant — voir « Armement
+   dérivé de l'état vol » ci-dessous. Republié chaque cycle.
+7. **Exécution du plan de vol** (avancement, publication de
+   `ConsigneDirectionSol`/`ConsigneGaz`) — uniquement si l'état courant
+   est `RoulageAuSol` ou `CourseDecollage` ; en dehors de ces deux états
+   (donc avant l'action « lancer la mission », voir plus bas), le plan
+   peut encore être chargé ou remplacé (voir « Injection du plan de vol »).
+
+### Origine des champs de `ContexteVol`
+
+| Champ | Source |
+|-------|--------|
+| `vitesse_sol_ms` | Norme **horizontale** de `EtatNavigation.vitesse_ned` : `sqrt(x² + y²)` — x = vitesse Nord, y = vitesse Est (convention NED, voir `estimation/ekf_navigation.rs`). Le vecteur complet (`Vector3::norme()`) inclurait la composante Down (vitesse verticale/taux de montée), ce qui fausserait la vitesse *sol* utilisée pour la rotation au décollage. |
+| `altitude_m` | `AltitudeFusionnee.altitude_m` |
+| `hauteur_sol_mm` | `AltitudeFusionnee.hauteur_sol_mm` — **correction de type** : `ContexteVol.hauteur_sol_mm` était `Option<u16>`, incohérent avec `AltitudeFusionnee.hauteur_sol_mm: Option<u32>` ; aligné sur `u32` (`HAUTEUR_FLARE_MM` aussi migrée en `u32`), aucune perte, juste une incohérence de type non détectée jusqu'ici faute de branchement réel. |
+| `altitude_cible_m` | Configuration de mission — reste hors périmètre de cette brique (valeur fixe/`TODO` acceptée pour l'instant, aucun essai courant n'en dépend). |
+| `estimation_prete` | `EtatNavigation.origine_definie` |
+
+### Armement dérivé de l'état vol
+
+`tx_arme` n'est piloté par aucune commande directe : c'est une fonction
+pure de `EtatVol` **et** de `EtatSecurite` (`doit_etre_arme`), republiée
+chaque cycle.
+
+| Plage d'états | `arme` |
+|---------------|--------|
+| `Armement` → `Arrondi` inclus (toute la séquence décollage/croisière/atterrissage jusqu'au flare) | `true` |
+| Tout le reste (`Boot`…`AttenteArmement`, `RoulageAuSol` *post-atterrissage*, `Desarmement`, `SauvegardeDonnees`) | `false` |
+| **Quel que soit l'état vol** : `EtatSecurite::ArretUrgence` ou `AtterrissageUrgence` | `false` |
+
+`Armement` est déjà armé (« Activation des actionneurs », voir table des
+états ci-dessus) ; `Desarmement` coupe immédiatement, sans délai —
+cohérent avec `doc/plan_essais.md` E0.8(b). La défense en profondeur du
+mixeur (`doc/controle.md`) reste en place indépendamment de cette
+dérivation.
+
+Le dernier cas (urgence sécurité) existe pour couvrir E0.8(a) : `forcer_urgence`
+(`etat_machine.rs`) n'agit que sur les états **en vol**
+(`EtatVol::est_en_vol()`) — un arrêt d'urgence déclenché depuis la console
+pendant un point fixe moteur (`RoulageAuSol`) ne change donc rien à la
+MAÉ vol elle-même. Sans ce garde-fou dans `doit_etre_arme`, `tx_arme`
+resterait à `true` (donc le mixeur laisserait passer la consigne gaz du
+plan de vol) tant que l'appareil reste au sol. La sécurité prime : la
+levée de l'urgence réarme automatiquement si l'état vol le justifie encore
+(pas de mémoire d'incident ici, voir `MaeSecurite` pour la nuance
+correspondante côté sécurité).
+
+### Canal de commande console — `mpsc<CommandeVol>`
+
+`CommandeVol` documente deux origines (« Sol » via LoRa, « Système ») —
+aucune des deux n'existe encore matériellement (`communications/commandes.rs`
+est `A FAIRE`). En v1, la seule origine réelle est la **console locale**
+(SSH/Wifi, voir mémoire projet), sur le même principe que
+`arret_urgence_console` déjà ajouté en appoint dans `taches_surete.rs`.
+
+`taches_mission.rs` possède le côté récepteur (`mpsc::Receiver<CommandeVol>`) ;
+la console (`console_armement.rs`) obtient un clone du côté émetteur pour
+envoyer les commandes opérateur. Canal `mpsc` (pas `watch`) : les
+commandes sont des événements discrets à traiter un par un, pas une
+valeur courante — même choix que `rx_imu` (`taches_estimation.rs`).
+
+**Deux actions opérateur distinctes**, confirmées par le vocabulaire déjà
+utilisé dans `doc/plan_essais.md` (E0.6, E0.7 : *« armer, lancer une
+mission »*) :
+
+- **Armer** (`CommandeVol::Armer`) : envoyée une fois la checklist
+  d'armement complète (`AttenteArmement → Armement`).
+- **Lancer la mission** (`CommandeVol::ArmementValide`) : confirmation
+  opérateur *séparée*, une fois en état `Armement` (`Armement →
+  RoulageAuSol`). Le commentaire d'`ArmementValide` dans `etat_machine.rs`
+  la classait comme « Système » — c'est en réalité une action opérateur
+  explicite via la console en v1, corrigé en conséquence. C'est cette
+  transition qui amène l'état courant à `RoulageAuSol`, la condition dont
+  dépend l'exécution du plan de vol (étape 7 ci-dessus).
+- **Désarmer** (`CommandeVol::Desarmer`, suivie immédiatement de
+  `CommandeVol::ActionneursDesarmes`) : voir « Actions armer/lancer/
+  désarmer » ci-dessus pour le détail et la justification du chaînage.
+
+Ces trois actions sont déclenchées depuis la check-liste d'armement
+(`console_armement.rs`), pas depuis le menu de test.
+
+### Injection du plan de vol
+
+`lancer_mission` ne prend pas de `PlanDeVol` en paramètre : la tâche est
+lancée tôt (dès que `rx_securite`/`rx_navigation`/`rx_altitude` existent,
+juste après `taches_surete::lancer_surete` dans `main.rs`), *avant* que
+l'opérateur ait choisi un fichier dans la check-liste — pas d'attente
+artificielle ajoutée, drivers/capteurs continuent de s'initialiser en
+parallèle comme aujourd'hui.
+
+À la place, `HandlesMission::tx_plan` (`watch::Sender<Option<PlanDeVol>>`)
+sert de dépôt : initialisé à `None`, la console y écrit le plan chargé une
+fois un fichier sélectionné (`v`, voir « Chargement du plan de vol »
+ci-dessus). Tant que l'état courant n'exécute pas encore le plan
+(`RoulageAuSol`/`CourseDecollage`, étape 7 ci-dessus), la tâche relit ce
+dépôt à chaque cycle — l'opérateur peut donc changer de fichier avant
+l'armement. Une fois l'exécution commencée, le plan est figé (plus de
+relecture de `tx_plan`) : pas de changement de plan en cours de roulage.
+
+### Diffusion de l'état vol
+
+Aucun canal n'exposait `EtatVol` avant cette brique. Nouveau
+`watch::Sender<EtatVol>`/`Receiver<EtatVol>`, possédé par
+`taches_mission.rs` — même principe que `tx_securite` dans
+`taches_surete.rs`. Consommé par la télémétrie (à venir) et les tests.
 
 ---
 

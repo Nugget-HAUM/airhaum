@@ -44,7 +44,7 @@ croissante → décollage → vol rasant en ligne droite → virages → ...) :
 | 1 | [x] | `pid.rs` | PID générique réutilisé par tous les contrôleurs | — |
 | 2 | [x] | `mixeur.rs` | Commandes normalisées → `ConsignesServos` (µs) | testable dès la brique 1 |
 | 3 | [x] | `controleur_direction_sol.rs` | Cap au sol → commande direction (roulage, course décollage) | `pid.rs` |
-| 4 | [x] | `taches_controle.rs` | Branchement complet (direction sol, roulis, tangage, lacet, gaz) + mixeur, arbitrage `PhaseControle` (mission → contrôle, à venir) | 1, 2, 3, 5, 6, 7 |
+| 4 | [x] | `taches_controle.rs` | Branchement complet (direction sol, roulis, tangage, lacet, gaz) + mixeur, arbitrage `PhaseControle`. Branchée dans `airhaum_test/main.rs`, alimentée par `taches_mission.rs` (gains provisoires, non réglés à l'essai) | 1, 2, 3, 5, 6, 7 |
 | 5 | [x] | `controleur_roulis.rs` | Roulis → commande ailerons (cascade angle→taux) | `pid.rs` |
 | 6 | [x] | `controleur_tangage.rs` | Tangage → commande profondeur (cascade angle→taux) | `pid.rs` |
 | 7 | [x] | `controleur_lacet.rs` | Coordination de virage en vol → commande direction | `pid.rs` — après validation du vol rasant en ligne droite |
