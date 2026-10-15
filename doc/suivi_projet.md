@@ -183,4 +183,19 @@ ne se mettent pas à jour tout seuls.
       validation formelle par la série d'essais dédiée
       (`doc/plan_essais.md`, E0.3 arbitrage, E0.7 point fixe moteur, E0.8–E0.10
       coupure gaz/perte RC/watchdog liaison).
+      **Remplacé par l'ESP32** (ci-dessous) après la clôture de E0.1 ;
+      firmware archivé dans `doc/archives/nano/`.
+- [x] **Contrôleur servo ESP32** (2026-10-15) — WEMOS D1 MINI ESP32
+      (ESP32-WROOM-32), firmware `esp32/esp32.ino` + `esp32/RcIbus.*` :
+      RC en iBUS sur UART matériel (fin du bruit de mesure PWM du Nano,
+      `doc/essais/E0.1.md`), sorties servo/variateur LEDC matérielles,
+      liaison Pi en 3,3 V direct (plus d'adaptateur de niveau). Même
+      logique de sécurité que le Nano et protocole Pi inchangé — aucune
+      modification côté Rust. Monté sur la platine, RC → servos validé,
+      liaison Pi validée (check-liste d'armement : « Liaison Arduino + RC
+      OK »). Voir `doc/interface_pi_rc_servos.md`. Reste à faire :
+      re-vérifier la calibration des manches en iBUS
+      (`doc/recepteur_rc.md`), valider le failsafe du récepteur (perte RC
+      réellement détectée à la coupure de l'émetteur), puis rejouer la
+      série E0 à partir de E0.1 sur la nouvelle chaîne.
 

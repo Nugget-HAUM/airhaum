@@ -49,7 +49,17 @@ static const uint16_t US_MAX    = 2000;
 
 static const uint32_t DELAI_CHIEN_DE_GARDE_MS = 2000UL;
 static const uint32_t DELAI_RC_PERDU_MS       = 1000UL;
+// DIAGNOSTIC TEMPORAIRE (doc/essais/E0.1.md) : remontée brute à 50 Hz pour
+// analyser le signal RC non filtré à sa résolution réelle. Commenter la ligne
+// ci-dessous pour revenir au fonctionnement normal (remontée à 10 Hz, valeurs
+// de commande filtrées). Ne change rien au contrôle, uniquement à la télémétrie.
+#define DIAGNOSTIC_REMONTEE_BRUTE_50HZ
+
+#if defined(DIAGNOSTIC_REMONTEE_BRUTE_50HZ)
+static const uint32_t PERIODE_REMONTEE_MS     =   20UL;
+#else
 static const uint32_t PERIODE_REMONTEE_MS     =  100UL;
+#endif
 
 // ─── Objets ──────────────────────────────────────────────────────────────────
 
@@ -121,12 +131,68 @@ static void lire_consignes_pi() {
     }
 }
 
+// ─── Filtre de plausibilité RC ────────────────────────────────────────────────
+// La lecture RC (RcPwm.cpp) présente un bruit de mesure inhérent à la
+// technique (capture par interruption + micros(), latence variable — voir
+// doc/essais/E0.1.md) : jusqu'à ~28 µs observés en essai, sur toute
+// combinaison récepteur/carte testée.
+//
+// Une première approche par seuil de saut (rejet d'une trame isolée
+// au-delà d'un seuil fixe) s'est révélée inefficace : un seuil fixé
+// au-dessus du bruit mesuré, pour ne jamais retarder un vrai mouvement,
+// ne se déclenche par construction jamais sur ce même bruit (essai
+// documenté dans doc/essais/E0.1.md). Remplacée par une moyenne mobile
+// exponentielle (EMA) : atténue toute variation proportionnellement à
+// alpha, bruit compris, sans avoir à deviner une frontière entre bruit
+// et petit mouvement réel — les deux se recouvrent en amplitude.
+// alpha=0,3 validé par simulation sur les campagnes de mesure : réduit
+// le bruit résiduel à quelques µs, au prix d'un délai à 90% d'environ
+// 130ms pour un mouvement soutenu (doc/essais/E0.1.md).
+//
+// Ne s'applique volontairement pas à CH_SWA (arbitrage manuel/autopilote) :
+// c'est le canal de sécurité principal, sa bascule doit rester instantanée,
+// sans délai (doc/interface_pi_rc_servos.md, « La bascule est instantanée,
+// sans transition progressive »).
+//
+// Arithmétique en virgule fixe (×256) — évite le coût d'une implémentation
+// flottante logicielle dans la boucle principale.
+static const int32_t EMA_ALPHA_NUM = 77;    // 77/256 ≈ 0,301
+static const int32_t EMA_ALPHA_DEN = 256;
+
+static int32_t ema_etat_x256[NB_CANAUX_RC];
+static bool    ema_initialise[NB_CANAUX_RC] = {false};
+// Dernière valeur brute effectivement traitée par canal — lire_rc() est
+// appelée à chaque tour de loop() (bien plus vite que le rythme réel des
+// trames RC, ~50Hz) ; sans cette garde, la même valeur brute serait
+// réinjectée des centaines de fois entre deux vraies mesures et le filtre
+// convergerait quasi instantanément, perdant tout effet de lissage.
+static uint16_t derniere_brute[NB_CANAUX_RC];
+
+static uint16_t filtrer_canal(uint8_t i, uint16_t brut) {
+    if (!ema_initialise[i]) {
+        // Première lecture réelle : pas de lissage, on part directement
+        // de la valeur mesurée (évite un régime transitoire au démarrage).
+        ema_etat_x256[i]  = (int32_t)brut * EMA_ALPHA_DEN;
+        derniere_brute[i] = brut;
+        ema_initialise[i] = true;
+        return brut;
+    }
+    if (brut != derniere_brute[i]) {
+        derniere_brute[i] = brut;
+        int32_t brut_x256 = (int32_t)brut * EMA_ALPHA_DEN;
+        ema_etat_x256[i] += (EMA_ALPHA_NUM * (brut_x256 - ema_etat_x256[i])) / EMA_ALPHA_DEN;
+    }
+    return (uint16_t)((ema_etat_x256[i] + EMA_ALPHA_DEN / 2) / EMA_ALPHA_DEN);  // arrondi
+}
+
 // ─── Lecture canaux RC via PWM individuel (A1-A5) ────────────────────────────
 
 static void lire_rc() {
     if (rcpwm_pret()) {
-        for (uint8_t i = 0; i < NB_CANAUX_RC; i++)
-            canaux_rc[i] = rcpwm_lire(i);
+        for (uint8_t i = 0; i < NB_CANAUX_RC; i++) {
+            uint16_t brut = rcpwm_lire(i);
+            canaux_rc[i] = (i == CH_SWA) ? brut : filtrer_canal(i, brut);
+        }
         rc_actif = true;
     }
 
@@ -175,8 +241,13 @@ static void envoyer_remontee() {
     t[0] = DEBUT_REMONTEE;
     t[1] = fanions;
     for (uint8_t i = 0; i < NB_CANAUX_RC; i++) {
-        t[2 + i * 2]     =  canaux_rc[i] & 0xFF;
-        t[2 + i * 2 + 1] = (canaux_rc[i] >> 8) & 0xFF;
+#if defined(DIAGNOSTIC_REMONTEE_BRUTE_50HZ)
+        const uint16_t valeur = rcpwm_lire(i);   // largeur brute, non filtrée
+#else
+        const uint16_t valeur = canaux_rc[i];
+#endif
+        t[2 + i * 2]     =  valeur & 0xFF;
+        t[2 + i * 2 + 1] = (valeur >> 8) & 0xFF;
     }
     // NB_CANAUX_RC=5 → octets 2..11, gaz_applique en 12-13
     t[12] =  gaz_applique & 0xFF;

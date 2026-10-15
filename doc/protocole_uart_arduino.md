@@ -1,15 +1,21 @@
-# Protocole UART Pi ↔ Arduino Nano — AirHaum II
+# Protocole UART Pi ↔ contrôleur servo (ESP32) — AirHaum II
 
-Liaison série matérielle sur D0 (RX0, consignes Pi→Nano) et D1 (TX0, remontée Nano→Pi), 57 600 bauds.
-Adaptateur de niveau 3,3V / 5V intercalé entre Pi et Nano.
+Liaison série matérielle entre l'UART2 du Pi (`/dev/ttyS2`) et l'UART1 de
+l'ESP32 : IO26 (RX, consignes Pi→ESP32) et IO19 (TX, remontée ESP32→Pi),
+57 600 bauds, 3,3 V direct (pas d'adaptateur de niveau).
 
-Deux types de trames : **consignes** (Pi → Arduino, 50 Hz) et **remontée**
-(Arduino → Pi, 10 Hz). Chaque trame commence par un octet de début distinct
+Le protocole est inchangé depuis le contrôleur Arduino Nano qui a précédé
+l'ESP32 (le nom du fichier en est hérité) : le driver Pi
+`src/drivers/controleur_servo.rs` fonctionne avec l'un comme avec l'autre.
+Câblage complet : `doc/interface_pi_rc_servos.md`.
+
+Deux types de trames : **consignes** (Pi → ESP32, 50 Hz) et **remontée**
+(ESP32 → Pi, 10 Hz). Chaque trame commence par un octet de début distinct
 pour permettre la resynchronisation en cas d'octet perdu.
 
 ---
 
-## Trame Pi → Arduino (consignes, 50 Hz)
+## Trame Pi → ESP32 (consignes, 50 Hz)
 
 | Octet | Champ                | Type      | Détail                                       |
 |-------|----------------------|-----------|----------------------------------------------|
@@ -26,7 +32,7 @@ Débit à 50 Hz : 550 octets/s (< 1 % de la bande à 57 600 bauds).
 
 ### Règle gaz zéro
 
-Quand le bit armé vaut 0, l'Arduino ignore la valeur du canal 3 et applique
+Quand le bit armé vaut 0, l'ESP32 ignore la valeur du canal 3 et applique
 la consigne gaz minimale (1 000 µs) quelle que soit la valeur reçue.
 
 ### Chien de garde
@@ -39,26 +45,34 @@ Sur absence de trame valide pendant **2 secondes** (100 trames manquées) :
 
 Aucune bascule automatique de mode : le Pi reçoit le flag à son réveil et
 réagit dans sa MAÉ vol. Le pilote peut reprendre la main à tout moment
-via le canal d'arbitrage RC (liaison récepteur RC - Arduino Nano).
+via le canal d'arbitrage RC (liaison récepteur RC → ESP32).
 
 ---
 
-## Trame Arduino → Pi (remontée, 10 Hz)
+## Trame ESP32 → Pi (remontée, 10 Hz)
 
 | Octet | Champ             | Type      | Détail                                              |
 |-------|-------------------|-----------|-----------------------------------------------------|
 | 0     | Début de trame    | uint8     | `0xBB`                                              |
 | 1     | Fanions           | uint8     | bit 0 = mode (0 autopilote / 1 manuel), bit 1 = sécurité RC perdue, bit 2 = chien de garde Pi déclenché |
-| 2–3   | Canal RC 1 (A1)   | uint16 LE | Valeur PWM µs — CH1 Ailerons                        |
-| 4–5   | Canal RC 2 (A2)   | uint16 LE | CH2 Profondeur                                      |
-| 6–7   | Canal RC 3 (A3)   | uint16 LE | CH3 Gaz                                             |
-| 8–9   | Canal RC 4 (A4)   | uint16 LE | CH4 Direction                                       |
-| 10–11 | Canal RC 5 (A5)   | uint16 LE | CH7 SWA — canal d'arbitrage                         |
+| 2–3   | Canal RC 1        | uint16 LE | Valeur µs — CH1 Ailerons                            |
+| 4–5   | Canal RC 2        | uint16 LE | CH2 Profondeur                                      |
+| 6–7   | Canal RC 3        | uint16 LE | CH3 Gaz                                             |
+| 8–9   | Canal RC 4        | uint16 LE | CH4 Direction                                       |
+| 10–11 | Canal RC 5        | uint16 LE | CH7 SWA — canal d'arbitrage                         |
 | 12–13 | Gaz appliqué      | uint16 LE | Consigne réellement envoyée au variateur (µs)       |
 | 14    | Somme de contrôle | uint8     | XOR des octets 1 à 13                               |
 
 Taille totale : **15 octets**.  
-Débit à 10 Hz : 150 octets/s.
+Débit à 10 Hz : 150 octets/s (50 Hz en option de campagne de mesure,
+`DIAGNOSTIC_REMONTEE_50HZ` dans `esp32/esp32.ino`).
+
+Les valeurs RC remontées sont celles reçues en iBUS, bornées à
+1 000–2 000 µs, sans filtrage. Avant la première trame iBUS valide, elles
+valent les valeurs de démarrage (neutre, gaz et arbitrage à 1 000 µs).
+
+Scripts de décodage de la remontée (toujours valables, le format n'ayant
+pas changé) : `doc/archives/nano/decode_remontee*.sh`.
 
 ---
 

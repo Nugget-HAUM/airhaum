@@ -47,7 +47,7 @@ Ce dépôt constitue à la fois :
 - **NEO-M8N** (GPS) – UART
 - **VL53L0X** (télémètre) – I2C
 - **SX1276** (LoRa) – SPI
-- **Arduino Nano** – UART (commande servos + secours radio)
+- **ESP32** (WEMOS D1 MINI ESP32) – UART (commande servos + secours radio, RC en iBUS)
 - *(Optionnel)* ESP32-CAM – UART (odométrie visuelle)
 
 ---

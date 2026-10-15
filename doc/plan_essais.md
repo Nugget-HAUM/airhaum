@@ -78,7 +78,7 @@ E1.0, premier essai en conditions réelles de vibration moteur.
 - **Objectif** : vérifier l'état de repos sûr à la mise sous tension.
 - **Prérequis** : avion assemblé, batterie propulsion débranchée ou
   hélice démontée.
-- **Procédure** : mettre sous tension Pi puis Arduino (ou ordre inverse),
+- **Procédure** : mettre sous tension Pi puis ESP32 (ou ordre inverse),
   observer les sorties avant toute réception de trame valide.
 - **Critères de réussite** : gaz maintenus au minimum, servos en position
   neutre, mode manuel actif par défaut.
@@ -120,7 +120,7 @@ E1.0, premier essai en conditions réelles de vibration moteur.
 - **Critères d'arrêt** : bascule qui ne prend pas effet ou effet retardé ;
   absence de passage en `ArretUrgence` lors de la reprise manuelle.
 - **Vérifications post-essai** : cohérence de l'état de mode remonté par
-  l'Arduino avec la position réelle de l'interrupteur ; état de sécurité
+  l'ESP32 avec la position réelle de l'interrupteur ; état de sécurité
   atteint dans les logs.
 
 ### E0.4 — Sens et débattement des servos
@@ -247,11 +247,11 @@ E1.0, premier essai en conditions réelles de vibration moteur.
 - **Vérifications post-essai** : (b) délai réel de détection, état de
   sécurité atteint ; (a) qualité de lien observée par palier de distance.
 
-### E0.10 — Watchdog liaison Pi ↔ Arduino
+### E0.10 — Watchdog liaison Pi ↔ ESP32
 
 - **Objectif** : vérifier la réaction à une perte de liaison série.
 - **Prérequis** : E0.9 validé.
-- **Procédure** : couper volontairement la liaison Pi → Arduino (ex.
+- **Procédure** : couper volontairement la liaison Pi → ESP32 (ex.
   débrancher ou arrêter le processus côté Pi) pendant que le système est
   en mode autopilote, gaz non nuls.
 - **Critères de réussite** : gaz ramenés à zéro et surfaces mises à plat

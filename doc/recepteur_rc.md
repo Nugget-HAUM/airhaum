@@ -1,5 +1,12 @@
 Commande Flysky 
-Recepteur FS-IA10B — lecture PWM individuel (A1–A5 sur le Nano)
+Récepteur FlySky — sortie iBUS lue par l'ESP32 (UART2, IO23), voir
+`doc/interface_pi_rc_servos.md`. Réglage émetteur : *RX Setup → Output
+mode → Serial : i-BUS*.
+
+Les valeurs ci-dessous ont été mesurées sur le FS-iA10B en PWM individuel,
+lu par l'ancien Nano. L'iBUS transporte les mêmes valeurs de canaux, mais
+elles restent à re-vérifier sur la nouvelle chaîne (traces USB de l'ESP32,
+ou remontée côté Pi).
 
 Canaux et valeurs mesurées (µs) :
 CH1 : axe horizontal droite — ailerons    (1381 milieu, 900 gauche, 1879 droite)

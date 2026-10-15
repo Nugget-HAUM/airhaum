@@ -15,15 +15,17 @@ airhaum/
 │   ├── gestion_du_temps.md         # ok: Doc de la gestion du temps
 │   ├── initialisation.md           # ok: Doc initialisation et calibration capteurs
 │   ├── projet.md                   # ok: Doc générale du projet
+│   ├── essais/                     # ok: Comptes rendus d'essais (E0.1.md…)
+│   └── archives/                   # ok: Éléments abandonnés, conservés pour référence
+│       └── nano/                   # ok: Ancien firmware Arduino Nano (RC en PWM) + scripts decode_remontee*.sh, toujours valables
 │    
 ├── config/                         # A FAIRE
 │   ├── default.toml                # A FAIRE: Configuration par défaut
 │   ├── calibration.toml            # A FAIRE: Données de calibration
 │   
-├── nano/                           # ok: Firmware Arduino Nano (contrôle servo, secours radio)
-│   ├── nano.ino                    # ok
-│   ├── RcPwm.cpp / RcPwm.h         # ok
-│   └── decode_remontee*.sh         # ok: Scripts de décodage des remontées série
+├── esp32/                          # ok: Firmware contrôleur servo ESP32 (WEMOS D1 MINI ESP32, secours radio)
+│   ├── esp32.ino                   # ok: Arbitrage, chien de garde, sorties LEDC, liaison Pi
+│   └── RcIbus.cpp / RcIbus.h       # ok: Décodage iBUS (UART matériel)
 │
 ├── lora/                           # A FAIRE: Code hors-Pi de la liaison LoRa (pont matériel simple, sans logique protocole)
 │   ├── wemos/                      # A FAIRE: Firmware Wemos, relai SPI (SX1276) ↔ USB, transparent
@@ -70,7 +72,7 @@ airhaum/
 │   │   ├── lora/                   # ok: Driver SPI du SX1276 côté Pi (distinct du dossier lora/ à la racine)
 │   │   │   ├── mod.rs              # ok
 │   │   │   └── sx1276.rs           # ok: Driver SX1276 (init, TX/RX bas niveau, polling IRQ) — TX validé sur matériel réel (2026-07-18), RX non testé
-│   │   ├── controleur_servo.rs     # ok: Communication Arduino (protocole binaire, testé)
+│   │   ├── controleur_servo.rs     # ok: Communication ESP32 (protocole binaire, testé)
 │   │   └── vision.rs               # A FAIRE: Trait pour future ESP32-CAM
 │   │
 │   ├── hal/                        # ok: Couche 1A: Hardware Abstraction Layer (ne doit jamais connaître les drivers)
@@ -172,7 +174,7 @@ airhaum/
 │       ├── taches_capteurs.rs      # ok: Threads capteurs I²C + canaux watch/mpsc
 │       ├── taches_estimation.rs    # ok: Tâche Tokio EKF navigation
 │       ├── taches_gps.rs           # ok: Tâche Tokio lecture GPS UART
-│       ├── taches_servo.rs         # ok: Thread liaison Arduino (envoi consignes / lecture état)
+│       ├── taches_servo.rs         # ok: Thread liaison ESP32 (envoi consignes / lecture état)
 │       ├── taches_controle.rs      # ok: direction sol + roulis/tangage/lacet, PhaseControle, câblée dans airhaum_test/main.rs (alimentée par taches_mission.rs, gains provisoires), voir doc/controle.md
 │       ├── taches_mission.rs       # ok : câblée dans airhaum_test/main.rs (armer/lancer/désarmer depuis console_armement.rs) — boucle FSM etat_machine.rs (forcer_urgence, tick, commandes console) + exécution du plan de vol (RoulageAuSol/CourseDecollage uniquement, plan injecté via tx_plan) + dérivation PhaseControle/tx_arme — voir doc/mission.md "Tâche mission"
 │       ├── taches_communication.rs # A FAIRE

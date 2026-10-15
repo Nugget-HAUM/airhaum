@@ -5,7 +5,7 @@
 La couche contrôle (couche 4) transforme les consignes de vol produites par
 la couche mission en commandes envoyées aux servos. Elle consomme l'état
 estimé (`EtatNavigation`, EKF navigation) et produit les `ConsignesServos`
-envoyées à l'Arduino Nano via `taches_servo`.
+envoyées au contrôleur servo ESP32 via `taches_servo`.
 
 Implémentation : `src/controle/`
 Tâche associée : `src/taches/taches_controle.rs`
@@ -29,7 +29,7 @@ consigne englobante unique.
 Chemin de données pour un axe :
 
 ```
-mission ──ConsigneXxx (watch)──▶ controleur_xxx ──commande normalisée──▶ mixeur ──ConsignesServos (watch)──▶ taches_servo ──UART──▶ Nano
+mission ──ConsigneXxx (watch)──▶ controleur_xxx ──commande normalisée──▶ mixeur ──ConsignesServos (watch)──▶ taches_servo ──UART──▶ ESP32
 ```
 
 ---
@@ -194,7 +194,7 @@ bornes matérielles du servo à la mission ; conversion dans le mixeur :
 `min (1000) + gaz * plage`, clamp [1000, 2000].
 
 **Défense en profondeur** : si `!arme`, le mixeur force le gaz au minimum
-quelle que soit `ConsigneGaz` — l'Arduino applique déjà sa propre garde
+quelle que soit `ConsigneGaz` — l'ESP32 applique déjà sa propre garde
 sur `arme` en aval, mais le mixeur ne doit pas laisser fuiter une
 consigne gaz non nulle restée dans le canal `watch` après un
 désarmement (plan d'essais, E0.8 : coupure gaz sans délai).

@@ -33,7 +33,7 @@ use console_test::{
     afficher_menu, afficher_sante,
     afficher_attitude, afficher_navigation, afficher_altitude,
     attendre_fix_gps, afficher_gps, sauvegarder_assistance_gps, campagne_statique_gps,
-    afficher_etat_arduino, tester_debattements_servos, afficher_journal,
+    afficher_etat_arduino, tester_debattements_servos, campagne_arduino, afficher_journal,
     afficher_serie_telemetre,
 };
 
@@ -550,6 +550,7 @@ async fn main() {
                 }
                 "5"  => afficher_etat_arduino(&servo),
                 "51" => tester_debattements_servos(&servo, &mut sequence_prevol),
+                "52" => campagne_arduino(&servo).await,
                 "6" => {
                     match airhaum::diagnostiques::test_communication_lora() {
                         Ok(_) => log::info!(target: "diag", "Communication LoRa (SX1276) OK"),

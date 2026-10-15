@@ -51,7 +51,7 @@ Tout état peut basculer vers `AtterrissageUrgence` sur condition critique.
 | Géofence dépassée                           | position hors limites                                | `AtterrissageUrgence` |
 | Batterie critique                           | tension < seuil configurable (non câblé — pas de capteur v1) | `AtterrissageUrgence` |
 | Commande arrêt d'urgence sol                | console opérateur aujourd'hui (LoRa en seconde source à terme) | `ArretUrgence` |
-| Nano en mode manuel après passage en autopilote | le pilote RC reprend la main (voir `mode_manuel_rc`) | `ArretUrgence` |
+| ESP32 en mode manuel après passage en autopilote | le pilote RC reprend la main (voir `mode_manuel_rc`) | `ArretUrgence` |
 
 Note : la perte GPS en phase de décollage ou atterrissage a une criticité
 différente qu'en croisière. La politique exacte (ex. loiter) est à affiner

@@ -44,6 +44,7 @@ pub fn afficher_menu(etat_vol: &EtatVol) {
     println!("  44. GPS     - Campagne de mesure statique (log boîte noire)");
     println!("  5.  Arduino - État liaison et RC");
     println!("  51. Arduino - Test servos (débattements)");
+    println!("  52. Arduino - Campagne de diagnostic RC (log boîte noire)");
     println!("  6.  LoRa    - Test communication SPI (SX1276)");
     println!("  61. LoRa    - Envoi \"Hello LoRa!\" de test (à comparer côté Wemos/PC)");
     println!("  s.  Santé capteurs - état en temps réel");
@@ -499,6 +500,47 @@ pub fn afficher_etat_arduino(servo: &HandlesServo) {
     println!("  Canaux RC (µs)   : CH1={}  CH2={}  CH3={}  CH4={}  CH5={}",
         etat.canaux_rc[0], etat.canaux_rc[1], etat.canaux_rc[2],
         etat.canaux_rc[3], etat.canaux_rc[4]);
+}
+
+/// Campagne de diagnostic : enregistre la remontée Arduino (canaux RC,
+/// mode, gaz appliqué) dans la boîte noire pendant une durée donnée — un
+/// échantillon par trame de remontée reçue (~10 Hz), même principe que
+/// `campagne_statique_gps`. Utilisé pour caractériser l'anomalie de
+/// micro-mouvements servo, voir `doc/essais/E0.1.md`.
+pub async fn campagne_arduino(servo: &HandlesServo) {
+    const DUREE_S_DEFAUT: u64 = 90;
+
+    println!("\n── Campagne de diagnostic Arduino (remontée RC) ─────────────────");
+    print!("  Durée en secondes [{}] : ", DUREE_S_DEFAUT);
+    io::stdout().flush().unwrap();
+    let mut input = String::new();
+    io::stdin().read_line(&mut input).unwrap();
+    let duree_s: u64 = input.trim().parse().unwrap_or(DUREE_S_DEFAUT);
+    let duree = std::time::Duration::from_secs(duree_s);
+
+    println!("  Démarrage — {} s, un échantillon par trame de remontée reçue (~10 Hz).", duree_s);
+    println!("  (n'interrompez pas le programme avant la fin pour garder une série complète)\n");
+    log::info!(target: "arduino_campagne", "Début campagne — durée prévue {} s", duree_s);
+
+    let debut = std::time::Instant::now();
+    let mut rx = servo.rx_etat.clone();
+    let mut n  = 0u32;
+
+    while debut.elapsed() < duree {
+        if let Ok(Ok(())) = tokio::time::timeout(std::time::Duration::from_millis(500), rx.changed()).await {
+            n += 1;
+            let e = rx.borrow_and_update().clone();
+            log::info!(target: "arduino_campagne",
+                "t_ms={} ch1={} ch2={} ch3={} ch4={} ch5={} mode={:?} rc_perdu={} chien_de_garde={} gaz_applique={}",
+                debut.elapsed().as_millis(),
+                e.canaux_rc[0], e.canaux_rc[1], e.canaux_rc[2], e.canaux_rc[3], e.canaux_rc[4],
+                e.mode, e.rc_perdu, e.chien_de_garde, e.gaz_applique);
+        }
+    }
+
+    log::info!(target: "arduino_campagne", "Fin campagne — {} échantillons", n);
+    println!("\n── Campagne terminée — {} échantillons ─────────────────────────", n);
+    println!("  Voir la boîte noire (target=\"arduino_campagne\") pour le post-traitement.");
 }
 
 /// Test interactif des débattements des surfaces de vol.
