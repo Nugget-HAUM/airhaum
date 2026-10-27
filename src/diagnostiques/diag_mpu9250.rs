@@ -426,8 +426,8 @@ pub fn calibrer_mag<I: BusI2c>(i2c: I) -> crate::types::Result<()> {
     let biais = Vector3::nouveau(session.offset_x, session.offset_y, session.offset_z);
     println!("  Terrain « {} » : inclinaison {:.1}°, champ {:.1} µT", nom_terrain, inclinaison, champ);
     if par_defaut {
-        println!("  ⚠ champ terrestre non renseigné pour ce terrain : valeurs par défaut (le Mans,");
-        println!("    approximatives). Décalage vertical moins précis loin du Mans — renseigner");
+        println!("  ⚠ champ terrestre non renseigné pour ce terrain : valeurs par défaut (le Mans).");
+        println!("    Décalage vertical moins précis loin du Mans — renseigner");
         println!("    inclinaison_magnetique_deg et champ_magnetique_ut dans {} (calculateur NOAA).",
                  RegistreTerrains::identifiant_capteur());
         log::warn!(target: "calibration",

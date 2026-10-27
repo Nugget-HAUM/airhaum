@@ -153,9 +153,9 @@ pub fn evaluer_capteur(nom: &str, valide: bool, erreurs_consecutives: u32) -> Et
 /// de la trame de remontée (pas de compteur d'erreurs pour cette liaison).
 pub fn evaluer_arduino(rc_perdu: bool, chien_de_garde: bool) -> EtatSante {
     if chien_de_garde {
-        EtatSante::Degrade { raison: "Arduino : chien de garde déclenché".into() }
+        EtatSante::Degrade { raison: "ESP32 : chien de garde déclenché".into() }
     } else if rc_perdu {
-        EtatSante::Degrade { raison: "Arduino : signal RC perdu".into() }
+        EtatSante::Degrade { raison: "ESP32 : signal RC perdu".into() }
     } else {
         EtatSante::Nominal
     }

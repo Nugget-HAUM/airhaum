@@ -148,7 +148,8 @@ et une composante verticale égale à `−Bh·tan(I)`. Le décalage (3 axes) et
 `Bh` sont ajustés par moindres carrés, au départ d'un cercle ajusté autour
 de la verticale moyenne. Le décalage vertical repose sur l'**inclinaison
 du champ terrestre** au terrain (modèle WMM, valeurs stockées dans le registre des
-terrains : `calibration_terrains_gps.toml`, ≈ 63° et ≈ 48 µT au Mans).
+terrains : `calibration_terrains_gps.toml` ; 63,5° et 48,1 µT au Mans,
+WMM2025 en 2026).
 Erreur induite : 1° d'inclinaison ≈ 2 µT vertical, sans effet sur le cap à
 plat, ≈ 2,5° de cap à 30° d'inclinaison en virage.
 
@@ -171,7 +172,7 @@ pour chaque terrain, `inclinaison_magnetique_deg` et `champ_magnetique_ut`
 <https://www.ngdc.noaa.gov/geomag/calculators/magcalc.shtml>), valables
 plusieurs années. Pour un terrain non renseigné (déplacement imprévu), la
 calibration n'est pas bloquée : elle utilise des valeurs approximatives du
-Mans (63°, 48 µT) et l'affiche. En France métropolitaine, l'erreur
+Mans (63,5°, 48,1 µT) et l'affiche. En France métropolitaine, l'erreur
 d'inclinaison reste de quelques degrés au plus (≈ 2 µT de décalage
 vertical par degré).
 

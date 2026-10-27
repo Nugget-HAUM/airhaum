@@ -260,7 +260,7 @@ pub async fn afficher_checklist_armement(
         };
         ligne(
             if arduino_ok { "✓" } else { "✗" },
-            "Liaison Arduino + RC",
+            "Liaison ESP32 + RC",
             if arduino_ok { "OK" } else { "KO" },
             &arduino_detail,
             if arduino_ok { "" } else { "  ← BLOQUANT" },

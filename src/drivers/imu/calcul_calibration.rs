@@ -48,11 +48,11 @@ pub const DISPERSION_CERCLE_MAX: f32 = 0.10;
 /// Écart maximal toléré entre composante horizontale mesurée et attendue.
 pub const ECART_CHAMP_HORIZONTAL_MAX: f32 = 0.25;
 /// Inclinaison magnétique par défaut (degrés), utilisée quand le terrain
-/// n'est pas renseigné : valeur approximative pour le Mans. Une erreur de
-/// 1° donne environ 2 µT sur le décalage vertical (`doc/calibration.md`).
-pub const INCLINAISON_DEFAUT_DEG: f32 = 63.0;
-/// Intensité du champ par défaut (µT), approximative pour le Mans.
-pub const CHAMP_DEFAUT_UT: f32 = 48.0;
+/// n'est pas renseigné : le Mans, WMM2025 en 2026. Une erreur de 1° donne
+/// environ 2 µT sur le décalage vertical (`doc/calibration.md`).
+pub const INCLINAISON_DEFAUT_DEG: f32 = 63.5;
+/// Intensité du champ par défaut (µT) : le Mans, WMM2025 en 2026.
+pub const CHAMP_DEFAUT_UT: f32 = 48.1;
 
 /// Une lecture de la carte dans le repère capteur, sans calibration.
 #[derive(Debug, Clone, Copy)]

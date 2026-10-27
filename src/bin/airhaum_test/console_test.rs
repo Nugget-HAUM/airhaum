@@ -42,9 +42,9 @@ pub fn afficher_menu(etat_vol: &EtatVol) {
     println!("  42. GPS     - Données en temps réel (10s)");
     println!("  43. GPS     - Sauvegarder assistance (position + orbites)");
     println!("  44. GPS     - Campagne de mesure statique (log boîte noire)");
-    println!("  5.  Arduino - État liaison et RC");
-    println!("  51. Arduino - Test servos (débattements)");
-    println!("  52. Arduino - Campagne de diagnostic RC (log boîte noire)");
+    println!("  5.  ESP32 - État liaison et RC");
+    println!("  51. ESP32 - Test servos (débattements)");
+    println!("  52. ESP32 - Campagne de diagnostic RC (log boîte noire)");
     println!("  6.  LoRa    - Test communication SPI (SX1276)");
     println!("  61. LoRa    - Envoi \"Hello LoRa!\" de test (à comparer côté Wemos/PC)");
     println!("  s.  Santé capteurs - état en temps réel");
@@ -491,7 +491,7 @@ pub fn afficher_etat_arduino(servo: &HandlesServo) {
     let liaison = servo.liaison_detectee.load(Ordering::Relaxed);
     let etat = servo.rx_etat.borrow();
 
-    println!("\n── État Arduino / RC ──────────────────────────────────────────");
+    println!("\n── État ESP32 / RC ────────────────────────────────────────────");
     println!("  Liaison détectée : {}", if liaison { "oui" } else { "non (aucune trame reçue)" });
     println!("  Mode             : {}", match etat.mode { ModeArduino::Autopilote => "autopilote", ModeArduino::Manuel => "manuel" });
     println!("  Signal RC        : {}", if etat.rc_perdu { "perdu" } else { "présent" });
@@ -510,7 +510,7 @@ pub fn afficher_etat_arduino(servo: &HandlesServo) {
 pub async fn campagne_arduino(servo: &HandlesServo) {
     const DUREE_S_DEFAUT: u64 = 90;
 
-    println!("\n── Campagne de diagnostic Arduino (remontée RC) ─────────────────");
+    println!("\n── Campagne de diagnostic ESP32 (remontée RC) ───────────────────");
     print!("  Durée en secondes [{}] : ", DUREE_S_DEFAUT);
     io::stdout().flush().unwrap();
     let mut input = String::new();
@@ -558,7 +558,7 @@ pub fn tester_debattements_servos(servo: &HandlesServo, sequence: &mut SequenceP
     println!("  [Entrée] confirmer et passer à l'étape suivante, q annuler.\n");
 
     if !servo.liaison_detectee.load(Ordering::Relaxed) {
-        println!("  ⚠  Aucune liaison Arduino détectée — les consignes seront envoyées sans confirmation de réception.\n");
+        println!("  ⚠  Aucune liaison ESP32 détectée — les consignes seront envoyées sans confirmation de réception.\n");
     }
 
     let surfaces: &[(&str, fn(u16) -> ConsignesServos)] = &[

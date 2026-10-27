@@ -61,7 +61,7 @@ peuvent être acquittés explicitement par l'opérateur.
 | Estimation active | `taches/taches_estimation` | EKF initialisé, attitude publiée |
 | Plan de vol chargé | `mission/plan_vol` | Au moins un segment défini — voir `doc/plan_de_vol.md` |
 | Sûreté nominale | `surete/` | FSM sécurité en état `Normal` |
-| Liaison Arduino | `hal/uart` | Port série opérationnel, canal RC valide |
+| Liaison ESP32 + RC | `hal/uart` | Port série opérationnel, canal RC valide |
 | Vérification pré-vol | `mission/armement` | Séquence d'activation unitaire des servos (débattements nominaux confirmés) |
 
 
