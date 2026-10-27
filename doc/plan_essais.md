@@ -92,9 +92,11 @@ E1.0, premier essai en conditions réelles de vibration moteur.
   qui en nécessitent une (gyroscope, accéléromètre, baromètre) via la
   console dédiée.
 - **Prérequis** : E0.1 validé, avion immobile, capteurs alimentés.
-- **Procédure** : dérouler la séquence de calibration de chaque capteur
-  concerné via la console de calibration, en respectant les conditions
-  requises par capteur (immobilité, mise à niveau, etc.).
+- **Procédure** : dérouler les procédures de `doc/calibration.md` via la
+  console de calibration : montage accéléromètre (atelier), calibration
+  de session (gyroscope + Z, vérification du montage), baromètre ;
+  magnétomètre (tour au sol) en complément, acquittable tant qu'il n'est
+  pas fusionné dans l'estimation.
 - **Critères de réussite** : calibration acceptée et stockée pour chaque
   capteur, horodatage cohérent, calibration signalée valide par la
   checklist d'armement.

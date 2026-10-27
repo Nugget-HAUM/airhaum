@@ -75,6 +75,12 @@ pub struct EntreeTerrain {
     pub longitude: f64,
     pub altitude_msl: f32,
     orbites: Vec<u8>,
+    /// Inclinaison du champ magnétique terrestre au terrain (degrés, positive
+    /// dans l'hémisphère nord) — modèle WMM, saisie à la main. Requise par la
+    /// calibration magnétomètre (`doc/calibration.md`, § 5).
+    pub inclinaison_magnetique_deg: Option<f32>,
+    /// Intensité totale du champ magnétique terrestre au terrain (µT) — WMM.
+    pub champ_magnetique_ut: Option<f32>,
 }
 
 impl EntreeTerrain {
@@ -87,6 +93,8 @@ impl EntreeTerrain {
             longitude:          assistance.longitude,
             altitude_msl:       assistance.altitude_msl,
             orbites:            assistance.orbites.clone(),
+            inclinaison_magnetique_deg: None,
+            champ_magnetique_ut:        None,
         }
     }
 
@@ -151,7 +159,13 @@ impl RegistreTerrains {
     /// capturée sur site, ou la crée si elle n'existe pas encore.
     pub fn definir(&mut self, nom: &str, assistance: &AssistanceGps) {
         match self.terrains.iter_mut().find(|t| t.nom == nom) {
-            Some(existant) => *existant = EntreeTerrain::depuis_assistance(nom.to_string(), assistance),
+            Some(existant) => {
+                // Les valeurs magnétiques, saisies à la main, sont conservées
+                let mut nouvelle = EntreeTerrain::depuis_assistance(nom.to_string(), assistance);
+                nouvelle.inclinaison_magnetique_deg = existant.inclinaison_magnetique_deg;
+                nouvelle.champ_magnetique_ut        = existant.champ_magnetique_ut;
+                *existant = nouvelle;
+            }
             None => self.terrains.push(EntreeTerrain::depuis_assistance(nom.to_string(), assistance)),
         }
     }
@@ -170,7 +184,10 @@ impl CalibrationPersistante for RegistreTerrains {
              # longitude (les autres champs ont des valeurs par défaut) ; altitude_msl,\n\
              # timestamp_unix_sec et orbites_hex sont mis à jour automatiquement par une\n\
              # sauvegarde réelle sur site (console de test, option « sauvegarder\n\
-             # assistance »). Voir doc/assistance_gps.md.\n\n"
+             # assistance »). Voir doc/assistance_gps.md.\n\
+             # Champ magnétique terrestre (calibration magnétomètre, doc/calibration.md) :\n\
+             # terrain.N.inclinaison_magnetique_deg et terrain.N.champ_magnetique_ut, à\n\
+             # saisir à la main (https://www.ngdc.noaa.gov/geomag/calculators/magcalc.shtml).\n\n"
         );
 
         match &self.terrain_actif {
@@ -184,6 +201,12 @@ impl CalibrationPersistante for RegistreTerrains {
             s.push_str(&format!("terrain.{i}.longitude = {}\n",     t.longitude));
             s.push_str(&format!("terrain.{i}.altitude_msl = {}\n",  t.altitude_msl));
             s.push_str(&format!("terrain.{i}.timestamp_unix_sec = {}\n", t.timestamp_unix_sec));
+            if let Some(v) = t.inclinaison_magnetique_deg {
+                s.push_str(&format!("terrain.{i}.inclinaison_magnetique_deg = {}\n", v));
+            }
+            if let Some(v) = t.champ_magnetique_ut {
+                s.push_str(&format!("terrain.{i}.champ_magnetique_ut = {}\n", v));
+            }
             s.push_str(&format!("terrain.{i}.orbites_hex = \"{}\"\n\n",  vers_hex(&t.orbites)));
         }
 
@@ -200,11 +223,14 @@ impl CalibrationPersistante for RegistreTerrains {
             altitude_msl:       Option<f32>,
             timestamp_unix_sec: Option<u64>,
             orbites:            Option<Vec<u8>>,
+            inclinaison_magnetique_deg: Option<f32>,
+            champ_magnetique_ut:        Option<f32>,
         }
         impl Partiel {
             fn vide() -> Self {
                 Self { nom: None, latitude: None, longitude: None, altitude_msl: None,
-                       timestamp_unix_sec: None, orbites: None }
+                       timestamp_unix_sec: None, orbites: None,
+                       inclinaison_magnetique_deg: None, champ_magnetique_ut: None }
             }
         }
 
@@ -233,6 +259,8 @@ impl CalibrationPersistante for RegistreTerrains {
                                 "altitude_msl"       => p.altitude_msl = valeur.parse().ok(),
                                 "timestamp_unix_sec" => p.timestamp_unix_sec = valeur.parse().ok(),
                                 "orbites_hex"        => p.orbites = depuis_hex(valeur),
+                                "inclinaison_magnetique_deg" => p.inclinaison_magnetique_deg = valeur.parse().ok(),
+                                "champ_magnetique_ut"        => p.champ_magnetique_ut = valeur.parse().ok(),
                                 _ => {}
                             }
                         }
@@ -252,6 +280,8 @@ impl CalibrationPersistante for RegistreTerrains {
                         altitude_msl:       p.altitude_msl.unwrap_or(0.0),
                         timestamp_unix_sec: p.timestamp_unix_sec.unwrap_or(0),
                         orbites:            p.orbites.unwrap_or_default(),
+                        inclinaison_magnetique_deg: p.inclinaison_magnetique_deg,
+                        champ_magnetique_ut:        p.champ_magnetique_ut,
                     });
                 }
                 _ => log::warn!(target: "gps",
@@ -314,6 +344,19 @@ mod tests {
         let b = r2.trouver("Terrain B").unwrap();
         assert_eq!(b.taille_orbites(), 0);
         assert!(r2.est_valide());
+    }
+
+    #[test]
+    fn champ_magnetique_saisi_conserve_par_sauvegarde_sur_site() {
+        let mut r = RegistreTerrains::depuis_toml(
+            "terrain.0.nom = \"haum\"\nterrain.0.latitude = 47.99\nterrain.0.longitude = 0.18\n\
+             terrain.0.inclinaison_magnetique_deg = 63.1\nterrain.0.champ_magnetique_ut = 47.8\n"
+        ).unwrap();
+        r.definir("haum", &assistance_test());
+        let r2 = RegistreTerrains::depuis_toml(&r.vers_toml()).unwrap();
+        let t = r2.trouver("haum").unwrap();
+        assert_eq!(t.inclinaison_magnetique_deg, Some(63.1));
+        assert_eq!(t.champ_magnetique_ut, Some(47.8));
     }
 
     #[test]

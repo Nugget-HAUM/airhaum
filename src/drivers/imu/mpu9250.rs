@@ -24,6 +24,10 @@ use crate::types::{
 };
 use crate::interfaces::imu::CentraleInertielle;
 use crate::drivers::imu::calibration::{CalibrationGyro, CalibrationAccel, CalibrationMag};
+use crate::drivers::imu::calcul_calibration::{
+    EchantillonCapteur, Matrice3, MONTAGE_DEFAUT, appliquer_matrice,
+};
+use crate::systeme::calibration::{EtatCalibration, CalibrationPersistante};
 
 /// Adresse I²C par défaut du MPU9250 (AD0 = GND)
 pub const ADRESSE_MPU9250: u8 = 0x68;
@@ -122,6 +126,10 @@ pub struct Mpu9250<I2C: BusI2c> {
     calib_accel: Option<CalibrationAccel>,
     calib_mag:   Option<CalibrationMag>,
 
+    /// Coefficients de sensibilité usine AK8963, relus à chaque initialisation
+    /// (repère capteur, axes réalignés)
+    asa: Vector3,
+
     // Dernière lecture pour cohérence temporelle
     derniere_lecture: Option<Horodatage>,
 }
@@ -136,6 +144,7 @@ impl<I2C: BusI2c> Mpu9250<I2C> {
             calib_gyro:  None,
             calib_accel: None,
             calib_mag:   None,
+            asa: Vector3::nouveau(1.0, 1.0, 1.0),
             derniere_lecture: None,
         }
     }
@@ -232,9 +241,9 @@ impl<I2C: BusI2c> Mpu9250<I2C> {
 
     /// Initialise l'AK8963 et lit les coefficients de sensibilité usine (ASA)
     ///
-    /// Retourne (asa_x, asa_y, asa_z) comme facteurs multiplicatifs corrigés :
-    /// Hadj = (ASA - 128) / 256 + 1
-    fn init_ak8963(&mut self) -> Result<(f32, f32, f32)> {
+    /// Retourne les facteurs multiplicatifs corrigés Hadj = (ASA - 128) / 256 + 1,
+    /// dans le repère capteur (axes réalignés sur l'accéléromètre).
+    fn init_ak8963(&mut self) -> Result<Vector3> {
         // Reset AK8963
         self.ak_ecrire(reg_ak::CNTL2, 0x01)?;
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -272,7 +281,8 @@ impl<I2C: BusI2c> Mpu9250<I2C> {
         // Configurer SLV0 pour lire en continu ST1 + 6 octets HX..HZ + ST2 = 8 octets
         self.ak_lire_setup(reg_ak::ST1, 8)?;
 
-        Ok((asa_x, asa_y, asa_z))
+        // Repère capteur : axes réalignés comme les mesures (voir mag_repere_capteur)
+        Ok(Vector3::nouveau(asa_y, asa_x, asa_z))
     }
 
     /// Séquence d'initialisation complète
@@ -296,164 +306,69 @@ impl<I2C: BusI2c> Mpu9250<I2C> {
 
         // 4. I2C master + init AK8963
         self.activer_i2c_master()?;
-        let (asa_x, asa_y, asa_z) = self.init_ak8963()?;
+        self.asa = self.init_ak8963()?;
 
-        // 5. Charger ou créer calibrations
-        self.charger_ou_creer_calibrations(asa_x, asa_y, asa_z)?;
+        // 5. Calibrations
+        self.charger_calibrations();
 
         self.etat = EtatCapteur::nouveau_operationnel();
         log::info!(target: "imu", "MPU9250 : initialisation OK");
         Ok(())
     }
 
-    /// Charge les calibrations depuis le disque, ou les crée si absentes/expirées
-    fn charger_ou_creer_calibrations(
-        &mut self,
-        asa_x: f32, asa_y: f32, asa_z: f32
-    ) -> Result<()> {
-        let gest = crate::systeme::calibration::gestionnaire();
-
-        // --- Gyro ---
-        self.calib_gyro = match gest.charger::<CalibrationGyro>()? {
-            Some(c) => {
-                log::info!(target: "imu", "MPU9250 : calibration gyro chargée");
-                Some(c)
+    /// Charge les calibrations enregistrées, **même expirées** : l'expiration
+    /// est un critère d'armement, pas d'utilisation (`doc/calibration.md`).
+    /// Aucune calibration automatique : une calibration absente reste absente
+    /// et la check-liste d'armement la signale.
+    fn charger_calibrations(&mut self) {
+        fn charger<C: CalibrationPersistante>(nom: &str) -> Option<C> {
+            match crate::systeme::calibration::gestionnaire().inspecter::<C>() {
+                EtatCalibration::Valide(c) => {
+                    log::info!(target: "imu", "MPU9250 : calibration {} chargée", nom);
+                    Some(c)
+                }
+                EtatCalibration::Expiree(c) => {
+                    log::warn!(target: "imu", "MPU9250 : calibration {} expirée — appliquée, à renouveler avant armement", nom);
+                    Some(c)
+                }
+                EtatCalibration::Absente => {
+                    log::warn!(target: "imu", "MPU9250 : calibration {} absente", nom);
+                    None
+                }
+                EtatCalibration::Corrompue(e) => {
+                    log::warn!(target: "imu", "MPU9250 : calibration {} inutilisable ({}) — à refaire", nom, e);
+                    None
+                }
             }
-            None => {
-                log::info!(target: "imu", "MPU9250 : calibration gyro manquante — calibration en cours");
-                let c = self.effectuer_calibration_gyro()?;
-                gest.sauvegarder(&c)?;
-                Some(c)
-            }
-        };
-
-        // --- Accel ---
-        self.calib_accel = match gest.charger::<CalibrationAccel>()? {
-            Some(c) => {
-                log::info!(target: "imu", "MPU9250 : calibration accel chargée");
-                Some(c)
-            }
-            None => {
-                log::info!(target: "imu", "MPU9250 : calibration accel manquante — calibration en cours");
-                let c = self.effectuer_calibration_accel()?;
-                gest.sauvegarder(&c)?;
-                Some(c)
-            }
-        };
-
-        // --- Mag ---
-        self.calib_mag = match gest.charger::<CalibrationMag>()? {
-            Some(c) => {
-                log::info!(target: "imu", "MPU9250 : calibration mag chargée");
-                Some(c)
-            }
-            None => {
-                log::warn!(target: "imu", "MPU9250 : calibration mag absente — ASA usine uniquement, calibrer avant armement");
-                let c = CalibrationMag::depuis_asa_uniquement(asa_x, asa_y, asa_z);
-                gest.sauvegarder(&c)?;
-                Some(c)
-            }
-        };
-
-        Ok(())
+        }
+        self.calib_gyro  = charger::<CalibrationGyro>("gyroscope");
+        self.calib_accel = charger::<CalibrationAccel>("accéléromètre (montage)");
+        self.calib_mag   = charger::<CalibrationMag>("magnétomètre");
+        if self.calib_accel.is_none() {
+            log::warn!(target: "imu", "MPU9250 : montage par défaut (carte à plat, X vers le nez)");
+        }
     }
 
     // =========================================================================
-    // Procédures de calibration
+    // Lecture dans le repère capteur (procédures de calibration)
     // =========================================================================
 
-    /// Calibration gyroscope : moyenne sur 200 échantillons, capteur immobile
-    fn effectuer_calibration_gyro(&mut self) -> Result<CalibrationGyro> {
-        log::info!(target: "imu", "Calibration gyro : immobile requis (5s)");
-        println!("  Calibration gyro : ne pas bouger le capteur (5s)...");
-        const N: i32 = 200;
-        let mut sum_x = 0i32;
-        let mut sum_y = 0i32;
-        let mut sum_z = 0i32;
-
-        for _ in 0..N {
-            let (gx, gy, gz) = self.lire_gyro_brut()?;
-            sum_x += gx as i32;
-            sum_y += gy as i32;
-            sum_z += gz as i32;
-            std::thread::sleep(std::time::Duration::from_millis(25));
-        }
-
-        let offset_x = (sum_x / N) as f32 * GYRO_SCALE;
-        let offset_y = (sum_y / N) as f32 * GYRO_SCALE;
-        let offset_z = (sum_z / N) as f32 * GYRO_SCALE;
-
-        log::info!(target: "imu", "Calibration gyro — offsets x={:.5} y={:.5} z={:.5} rad/s",
-                   offset_x, offset_y, offset_z);
-
-        Ok(CalibrationGyro::nouvelle(offset_x, offset_y, offset_z))
-    }
-
-    /// Calibration accéléromètre : sol plat, Z aligné avec gravité
-    fn effectuer_calibration_accel(&mut self) -> Result<CalibrationAccel> {
-        log::info!(target: "imu", "Calibration accel : capteur à plat requis (2s)");
-        println!("  Calibration accel : poser le capteur à plat (2s)...");
-        std::thread::sleep(std::time::Duration::from_millis(500));
-
-        const N: i32 = 100;
-        let mut sum_x = 0i32;
-        let mut sum_y = 0i32;
-        let mut sum_z = 0i32;
-
-        for _ in 0..N {
-            let (ax, ay, az) = self.lire_accel_brut()?;
-            sum_x += ax as i32;
-            sum_y += ay as i32;
-            sum_z += az as i32;
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-
-        let mean_x = (sum_x / N) as f32 * ACCEL_SCALE;
-        let mean_y = (sum_y / N) as f32 * ACCEL_SCALE;
-        let mean_z = (sum_z / N) as f32 * ACCEL_SCALE;
-
-        // Offsets : X et Y doivent être nuls, Z doit être ±9.80665 m/s²
-        let offset_x = mean_x;
-        let offset_y = mean_y;
-        let offset_z = mean_z - 9.80665; // retirer la gravité
-
-        // Scale : ratio entre gravité mesurée et gravité attendue sur Z
-        let scale_z = 9.80665 / (mean_z - offset_z).abs().max(0.1);
-
-        log::info!(target: "imu", "Calibration accel — offsets x={:.4} y={:.4} z={:.4} m/s²",
-                   offset_x, offset_y, offset_z);
-
-        Ok(CalibrationAccel::nouvelle(
-            offset_x, offset_y, offset_z,
-            1.0, 1.0, scale_z,
-        ))
+    /// Lit une mesure dans le repère capteur, **sans aucune calibration**
+    /// (unités SI, ASA appliqués, axes AK8963 réalignés). Sert aux
+    /// procédures de calibration (`diagnostiques/diag_mpu9250.rs`).
+    pub fn lire_repere_capteur(&mut self) -> Result<EchantillonCapteur> {
+        let (ax, ay, az, _temp, gx, gy, gz) = self.lire_tout_brut()?;
+        let mag = self.lire_mag_brut()?.map(|(mx, my, mz)| self.mag_repere_capteur(mx, my, mz));
+        Ok(EchantillonCapteur {
+            accel: Vector3::nouveau(ax as f32, ay as f32, az as f32) * ACCEL_SCALE,
+            gyro:  Vector3::nouveau(gx as f32, gy as f32, gz as f32) * GYRO_SCALE,
+            mag,
+        })
     }
 
     // =========================================================================
     // Lecture des données brutes
     // =========================================================================
-
-    /// Lit les données brutes gyro (16 bits signés, non compensées)
-    fn lire_gyro_brut(&mut self) -> Result<(i16, i16, i16)> {
-        let mut buf = [0u8; 6];
-        self.lire_multi(reg::GYRO_XOUT_H, &mut buf)?;
-        Ok((
-            i16::from_be_bytes([buf[0], buf[1]]),
-            i16::from_be_bytes([buf[2], buf[3]]),
-            i16::from_be_bytes([buf[4], buf[5]]),
-        ))
-    }
-
-    /// Lit les données brutes accel (16 bits signés, non compensées)
-    fn lire_accel_brut(&mut self) -> Result<(i16, i16, i16)> {
-        let mut buf = [0u8; 6];
-        self.lire_multi(reg::ACCEL_XOUT_H, &mut buf)?;
-        Ok((
-            i16::from_be_bytes([buf[0], buf[1]]),
-            i16::from_be_bytes([buf[2], buf[3]]),
-            i16::from_be_bytes([buf[4], buf[5]]),
-        ))
-    }
 
     /// Lit toutes les données en une seule transaction I²C (14 octets)
     ///
@@ -505,51 +420,52 @@ impl<I2C: BusI2c> Mpu9250<I2C> {
     // =========================================================================
     // Application des calibrations
     // =========================================================================
+    //
+    // Repère de sortie : avion (X nez, Y aile droite, Z bas), conventions de
+    // `estimation/attitude.rs` — voir `doc/calibration.md`, « Repère ».
 
-    fn appliquer_calib_gyro(&self, gx: i16, gy: i16, gz: i16) -> Vector3 {
-        let calib = self.calib_gyro.as_ref();
-        let (ox, oy, oz) = calib
-            .map(|c| (c.offset_x, c.offset_y, c.offset_z))
-            .unwrap_or((0.0, 0.0, 0.0));
-
-        Vector3::nouveau(
-            gx as f32 * GYRO_SCALE - ox,
-            gy as f32 * GYRO_SCALE - oy,
-            gz as f32 * GYRO_SCALE - oz,
-        )
+    fn montage(&self) -> Matrice3 {
+        self.calib_accel.map(|c| c.montage).unwrap_or(MONTAGE_DEFAUT)
     }
 
-    fn appliquer_calib_accel(&self, ax: i16, ay: i16, az: i16) -> Vector3 {
-        let calib = self.calib_accel.as_ref();
-        let (ox, oy, oz, sx, sy, sz) = calib
-            .map(|c| (c.offset_x, c.offset_y, c.offset_z,
-                      c.scale_x,  c.scale_y,  c.scale_z))
-            .unwrap_or((0.0, 0.0, 0.0, 1.0, 1.0, 1.0));
+    fn appliquer_calib_gyro(&self, gx: i16, gy: i16, gz: i16) -> Vector3 {
+        let biais = self.calib_gyro
+            .map(|c| Vector3::nouveau(c.offset_x, c.offset_y, c.offset_z))
+            .unwrap_or(Vector3::zero());
+        let w = Vector3::nouveau(gx as f32, gy as f32, gz as f32) * GYRO_SCALE - biais;
+        appliquer_matrice(&self.montage(), w)
+    }
 
+    /// Accéléromètre en gravité apparente (+g sur Z avion immobile à plat).
+    fn appliquer_calib_accel(&self, ax: i16, ay: i16, az: i16) -> Vector3 {
+        // Décalage Z de la session s'il existe, sinon celui de l'atelier
+        let decalage_z = self.calib_gyro.map(|c| c.offset_z_accel)
+            .or(self.calib_accel.map(|c| c.offset_z))
+            .unwrap_or(0.0);
+        let f = Vector3::nouveau(
+            ax as f32 * ACCEL_SCALE,
+            ay as f32 * ACCEL_SCALE,
+            az as f32 * ACCEL_SCALE - decalage_z,
+        );
+        appliquer_matrice(&self.montage(), f) * -1.0
+    }
+
+    /// Conversion µT avec ASA, puis réalignement des axes AK8963 sur ceux de
+    /// l'accéléromètre (fiche technique MPU9250 : X_mag = Y_accel,
+    /// Y_mag = X_accel, Z_mag = −Z_accel). `self.asa` est déjà réaligné.
+    fn mag_repere_capteur(&self, mx: i16, my: i16, mz: i16) -> Vector3 {
         Vector3::nouveau(
-            (ax as f32 * ACCEL_SCALE - ox) * sx,
-            (ay as f32 * ACCEL_SCALE - oy) * sy,
-            (az as f32 * ACCEL_SCALE - oz) * sz,
+             my as f32 * MAG_SCALE * self.asa.x,
+             mx as f32 * MAG_SCALE * self.asa.y,
+            -(mz as f32) * MAG_SCALE * self.asa.z,
         )
     }
 
     fn appliquer_calib_mag(&self, mx: i16, my: i16, mz: i16) -> Vector3 {
-        let calib = self.calib_mag.as_ref();
-        let (asa_x, asa_y, asa_z,
-             hix, hiy, hiz,
-             six, siy, siz) = calib
-            .map(|c| (c.asa_x, c.asa_y, c.asa_z,
-                      c.hard_iron_x, c.hard_iron_y, c.hard_iron_z,
-                      c.soft_iron_x, c.soft_iron_y, c.soft_iron_z))
-            .unwrap_or((1.0, 1.0, 1.0,
-                        0.0, 0.0, 0.0,
-                        1.0, 1.0, 1.0));
-
-        Vector3::nouveau(
-            (mx as f32 * MAG_SCALE * asa_x - hix) * six,
-            (my as f32 * MAG_SCALE * asa_y - hiy) * siy,
-            (mz as f32 * MAG_SCALE * asa_z - hiz) * siz,
-        )
+        let decalage = self.calib_mag
+            .map(|c| Vector3::nouveau(c.hard_iron_x, c.hard_iron_y, c.hard_iron_z))
+            .unwrap_or(Vector3::zero());
+        appliquer_matrice(&self.montage(), self.mag_repere_capteur(mx, my, mz) - decalage)
     }
 
     // =========================================================================
@@ -582,29 +498,23 @@ impl<I2C: BusI2c> CentraleInertielle for Mpu9250<I2C> {
             ));
         }
 
-        // Reprise rapide si calibrations valides
+        // Reprise rapide (sans reset matériel) si gyroscope et montage sont
+        // déjà calibrés, même expirés : cas d'un redémarrage en vol
         let gest = crate::systeme::calibration::gestionnaire();
-        let gyro_ok  = gest.charger::<CalibrationGyro>()?.is_some();
-        let accel_ok = gest.charger::<CalibrationAccel>()?.is_some();
-        let mag_ok   = gest.charger::<CalibrationMag>()?.is_some();
+        let gyro_ok  = matches!(gest.inspecter::<CalibrationGyro>(),
+                                EtatCalibration::Valide(_) | EtatCalibration::Expiree(_));
+        let accel_ok = matches!(gest.inspecter::<CalibrationAccel>(),
+                                EtatCalibration::Valide(_) | EtatCalibration::Expiree(_));
 
-        if gyro_ok && accel_ok && mag_ok {
+        if gyro_ok && accel_ok {
             log::info!(target: "imu", "MPU9250 : reprise rapide");
             // On réapplique quand même la config hardware (reset programme)
             self.reveiller()?;
             self.configurer_gyro()?;
             self.configurer_accel()?;
             self.activer_i2c_master()?;
-            // Réinit AK8963 sans refaire les ASA (on a les calib)
-            self.ak_ecrire(reg_ak::CNTL1, 0x00)?;
-            std::thread::sleep(std::time::Duration::from_millis(10));
-            self.ak_ecrire(reg_ak::CNTL1, 0x16)?;
-            self.ak_lire_setup(reg_ak::ST1, 8)?;
-
-            // Recharger les calibrations en mémoire
-            self.calib_gyro  = gest.charger::<CalibrationGyro>()?;
-            self.calib_accel = gest.charger::<CalibrationAccel>()?;
-            self.calib_mag   = gest.charger::<CalibrationMag>()?;
+            self.asa = self.init_ak8963()?;
+            self.charger_calibrations();
 
             self.etat = EtatCapteur::nouveau_operationnel();
             return Ok(());
@@ -650,90 +560,6 @@ impl<I2C: BusI2c> CentraleInertielle for Mpu9250<I2C> {
             magnetometre,
             temperature,
         })
-    }
-
-    fn calibrer_gyro(&mut self) -> Result<()> {
-        let c = self.effectuer_calibration_gyro()?;
-        crate::systeme::calibration::gestionnaire().sauvegarder(&c)?;
-        self.calib_gyro = Some(c);
-        Ok(())
-    }
-
-    fn calibrer_accel(&mut self) -> Result<()> {
-        let c = self.effectuer_calibration_accel()?;
-        crate::systeme::calibration::gestionnaire().sauvegarder(&c)?;
-        self.calib_accel = Some(c);
-        Ok(())
-    }
-
-    fn calibrer_mag(&mut self) -> Result<()> {
-        let asa_x = self.calib_mag.map(|c| c.asa_x).unwrap_or(1.0);
-        let asa_y = self.calib_mag.map(|c| c.asa_y).unwrap_or(1.0);
-        let asa_z = self.calib_mag.map(|c| c.asa_z).unwrap_or(1.0);
-
-        log::info!(target: "imu", "Calibration magnétomètre démarrée — rotations 3 axes (figure-8), 30s");
-        println!("Calibration magnétomètre :");
-        println!("  Effectuez des rotations lentes sur les 3 axes (figure-8)");
-        println!("  Collecte pendant 30 secondes...");
-
-        const N: usize = 300; // ~1 échantillon toutes les 100ms = 30s
-        let mut min_x = f32::MAX;  let mut max_x = f32::MIN;
-        let mut min_y = f32::MAX;  let mut max_y = f32::MIN;
-        let mut min_z = f32::MAX;  let mut max_z = f32::MIN;
-
-        let mut echantillons = 0usize;
-
-        for i in 0..N {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            if let Some((mx, my, mz)) = self.lire_mag_brut()? {
-                let x = mx as f32 * MAG_SCALE * asa_x;
-                let y = my as f32 * MAG_SCALE * asa_y;
-                let z = mz as f32 * MAG_SCALE * asa_z;
-                min_x = min_x.min(x); max_x = max_x.max(x);
-                min_y = min_y.min(y); max_y = max_y.max(y);
-                min_z = min_z.min(z); max_z = max_z.max(z);
-                echantillons += 1;
-            }
-            if i % 50 == 49 {
-                log::debug!(target: "imu", "Calibration mag : {}s / 30s", (i + 1) / 10);
-            }
-        }
-
-        if echantillons < 50 {
-            return Err(ErreursAirHaum::CalibrationEchouee(
-                format!("Trop peu d'échantillons mag: {}", echantillons)
-            ));
-        }
-
-        // Hard iron = centre de l'ellipsoïde
-        let hard_iron_x = (max_x + min_x) / 2.0;
-        let hard_iron_y = (max_y + min_y) / 2.0;
-        let hard_iron_z = (max_z + min_z) / 2.0;
-
-        // Soft iron simplifié = normalisation par rapport à l'axe le plus long
-        let range_x = (max_x - min_x) / 2.0;
-        let range_y = (max_y - min_y) / 2.0;
-        let range_z = (max_z - min_z) / 2.0;
-        let range_max = range_x.max(range_y).max(range_z).max(0.1);
-        let soft_iron_x = range_max / range_x.max(0.1);
-        let soft_iron_y = range_max / range_y.max(0.1);
-        let soft_iron_z = range_max / range_z.max(0.1);
-
-        log::info!(target: "imu", "Calibration mag — hard iron x={:.2} y={:.2} z={:.2} µT",
-                   hard_iron_x, hard_iron_y, hard_iron_z);
-        log::info!(target: "imu", "Calibration mag — soft iron x={:.3} y={:.3} z={:.3}",
-                   soft_iron_x, soft_iron_y, soft_iron_z);
-
-        let c = CalibrationMag::nouvelle(
-            asa_x, asa_y, asa_z,
-            hard_iron_x, hard_iron_y, hard_iron_z,
-            soft_iron_x, soft_iron_y, soft_iron_z,
-        );
-        crate::systeme::calibration::gestionnaire().sauvegarder(&c)?;
-        self.calib_mag = Some(c);
-
-        log::info!(target: "imu", "Calibration magnétomètre terminée");
-        Ok(())
     }
 
     fn obtenir_etat(&self) -> &EtatCapteur {

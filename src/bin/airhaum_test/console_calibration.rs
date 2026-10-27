@@ -35,7 +35,7 @@ pub fn afficher_bilan_calibrations(gps: &mut Option<HandlesGps>) -> bool {
             EtatCalibration::Absente      => ("— Absente ".into(), "—".into(), "—".into()),
             EtatCalibration::Valide(c)    => ("✓ Valide  ".into(), fmt_duree(c.age_secondes()), fmt_duree(c.temps_restant_secondes())),
             EtatCalibration::Expiree(c)   => ("✗ Expirée ".into(), fmt_duree(c.age_secondes()), "—".into()),
-            EtatCalibration::Corrompue(_) => ("✗ Corrompue".into(), "—".into(), "—".into()),
+            EtatCalibration::Corrompue(e) => ("✗ Illisible".into(), "—".into(), e.clone()),
         };
         println!("  {:<20} {:<12} {:<14} {}", nom, statut, age, restant);
     }
@@ -51,9 +51,9 @@ pub fn afficher_bilan_calibrations(gps: &mut Option<HandlesGps>) -> bool {
         println!("\n── Bilan des calibrations ───────────────────────────────────────────");
         println!("  {:<20} {:<12} {:<14} {}", "Capteur", "Statut", "Âge", "Validité restante");
         println!("  {}", "─".repeat(62));
-        ligne("Gyroscope",     &etat_gyro);
-        ligne("Accéléromètre", &etat_accel);
-        ligne("Magnétomètre",  &etat_mag);
+        ligne("Gyroscope + Z",  &etat_gyro);
+        ligne("Montage accél.", &etat_accel);
+        ligne("Magnétomètre",   &etat_mag);
         ligne("Baromètre",     &etat_baro);
         ligne("Télémètre",     &etat_telem);
 
@@ -73,16 +73,17 @@ pub fn afficher_bilan_calibrations(gps: &mut Option<HandlesGps>) -> bool {
 
         println!("  {}", "─".repeat(62));
 
-        let gyro_ko  = matches!(etat_gyro,  EtatCalibration::Absente | EtatCalibration::Expiree(_));
-        let accel_ko = matches!(etat_accel, EtatCalibration::Absente | EtatCalibration::Expiree(_));
-        let mag_ko   = matches!(etat_mag,   EtatCalibration::Absente | EtatCalibration::Expiree(_));
-        let baro_ko  = matches!(etat_baro,  EtatCalibration::Absente | EtatCalibration::Expiree(_));
+        // Corrompue compte aussi : cas des fichiers d'ancien format (doc/calibration.md)
+        let gyro_ko  = !matches!(etat_gyro,  EtatCalibration::Valide(_));
+        let accel_ko = !matches!(etat_accel, EtatCalibration::Valide(_));
+        let mag_ko   = !matches!(etat_mag,   EtatCalibration::Valide(_));
+        let baro_ko  = !matches!(etat_baro,  EtatCalibration::Valide(_));
         // Télémètre : calibration automatique à l'init du driver, pas d'action opérateur requise.
         let telem_ko = matches!(etat_telem, EtatCalibration::Absente | EtatCalibration::Expiree(_));
 
         let mut a_renouveler: Vec<&str> = Vec::new();
-        if gyro_ko  { a_renouveler.push("gyroscope"); }
-        if accel_ko { a_renouveler.push("accéléromètre"); }
+        if accel_ko { a_renouveler.push("montage (atelier)"); }
+        if gyro_ko  { a_renouveler.push("session (gyro + Z)"); }
         if mag_ko   { a_renouveler.push("magnétomètre"); }
         if baro_ko  { a_renouveler.push("baromètre"); }
 
@@ -98,7 +99,9 @@ pub fn afficher_bilan_calibrations(gps: &mut Option<HandlesGps>) -> bool {
         }
 
         println!();
-        println!("  Recalibrer :  g. Gyroscope    a. Accéléromètre    m. Magnétomètre    b. Baromètre");
+        println!("  Recalibrer (doc/calibration.md) :");
+        println!("    a. Montage accéléromètre (atelier)     g. Session : gyroscope + Z, vérif. montage");
+        println!("    m. Magnétomètre (tour au sol)          b. Baromètre");
         println!("  t. Terrain de vol (assistance GPS)");
         println!("  [Entrée] Continuer → check-liste armement    j. Journal    q. Quitter");
         print!("  Votre choix : ");

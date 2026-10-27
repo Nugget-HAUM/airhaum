@@ -55,6 +55,36 @@ ne se mettent pas à jour tout seuls.
 ## Dettes techniques
 - [ ] ** Fréquence cilbe ** le drivers MPU tourne a 125-110hz et non 200 comme visé
 
+- [ ] **ESP32 : surfaces non mises à plat sur chien de garde / perte RC en
+  autopilote** (`esp32/esp32.ino`, `appliquer_consignes()`, hérité du Nano).
+  En mode autopilote, seuls les gaz sont coupés : les gouvernes restent sur
+  la dernière consigne Pi (`cons_ailerons`, etc.), alors que
+  `doc/interface_pi_rc_servos.md` et `doc/protocole_uart_arduino.md`
+  annoncent des surfaces à plat, et que E0.9(b) / E0.10 l'exigent.
+  **À corriger avant E0.9.**
+
+- [ ] **ESP32 : resynchronisation fragile sur les trames Pi**
+  (`esp32/esp32.ino`, `lire_consignes_pi()`). Sur somme de contrôle
+  invalide, les 11 octets sont jetés en bloc. Or `0xAA` peut apparaître
+  dans un octet de poids faible (1194, 1450, 1706, 1962 µs) ou dans la
+  somme de contrôle : calé sur un faux début avec une consigne stable,
+  le firmware retombe sur le même décalage à chaque trame → chien de
+  garde → gaz coupés. Corriger comme côté Pi (`controleur_servo.rs` :
+  avancer d'un octet et rebalayer), et rectifier la section
+  « Resynchronisation » de `doc/protocole_uart_arduino.md`, qui affirme
+  à tort que les octets de début n'apparaissent jamais dans les données.
+  **À traiter à la prochaine modification du firmware ESP32.**
+
+- [ ] **Perte RC non détectée : le FS-iA6B continue d'émettre en iBUS**
+  (constaté le 2026-10-20). À la perte de liaison radio, le récepteur
+  renvoie indéfiniment les dernières valeurs reçues : l'ESP32 ne voit
+  jamais `rc_perdu`, gaz et gouvernes restent figés. Risque accepté pour
+  l'instant (identique au pilotage d'un avion RC classique sans
+  failsafe). Conséquence : le critère E0.9(b) (gaz à zéro, flag remonté)
+  ne peut pas être atteint en l'état. Piste si l'on veut lever ce
+  risque : configurer le failsafe sur l'émetteur (gaz au minimum, SWA en
+  position reconnaissable) et le faire détecter par le firmware.
+
 - [ ] **Arrêt des threads non-réactif** : `arreter()` positionne un drapeau mais un thread
   en veille longue (30 s, cas réinitialisation max) ne le voit qu'à son réveil.
   À corriger avant mise en production.
@@ -96,6 +126,26 @@ ne se mettent pas à jour tout seuls.
   et/ou cap déduit de la vitesse sol GPS, pour un lacet plus précis en
   vol. Ne bloque pas le développement de la couche contrôle (`doc/controle.md`),
   qui consomme `EtatNavigation.attitude.lacet` tel qu'il existe aujourd'hui.
+
+- [x] **Calibrations accéléromètre et magnétomètre inadaptées à l'avion**
+  (`drivers/imu/mpu9250.rs`, `console_calibration.rs`) : accéléromètre sur
+  une seule position (inclinaison prise pour un défaut, Z à 1,44 g),
+  magnétomètre en min/max (orientations impossibles à couvrir), axes AK8963
+  non réalignés. Nouvelles procédures et règles de validité définies dans
+  `doc/calibration.md` (2026-10-27), implémentées le 2026-10-27, **validées
+  sur cible le 2026-10-28** (E0.2, `doc/essais/E0.2.md`). Tour magnétomètre
+  avec empennage levé pris en compte (verticale suivie, v0.039). Au passage : signe de
+  l'accélération corrigé dans `estimation/ekf_navigation.rs` (prédiction
+  vitesse/position inversée, masquée tant que l'avion reste immobile).
+
+- [ ] **Champ magnétique terrestre saisi à la main par terrain**
+  (`calibration_terrains_gps.toml`, `inclinaison_magnetique_deg` /
+  `champ_magnetique_ut`). Pour un terrain non renseigné, la calibration
+  magnétomètre utilise des valeurs par défaut du Mans (non bloquant, avec
+  avertissement — `doc/calibration.md` § 5), d'autant moins justes que le
+  terrain est loin. À terme : calculer le champ sur le Pi avec le modèle
+  WMM2025 (coefficients NOAA publics, valable jusqu'en 2030) à partir de la
+  position du terrain ou du fix GPS, et supprimer la saisie.
 
 - [x] Validation des données GPS — checksum UBX/NMEA rejeté avec resync
   (`ubx_parser.rs`), fix non valide ignoré par la fusion. Garde-fou sur les
@@ -196,6 +246,8 @@ ne se mettent pas à jour tout seuls.
       OK »). Voir `doc/interface_pi_rc_servos.md`. Reste à faire :
       re-vérifier la calibration des manches en iBUS
       (`doc/recepteur_rc.md`), valider le failsafe du récepteur (perte RC
-      réellement détectée à la coupure de l'émetteur), puis rejouer la
-      série E0 à partir de E0.1 sur la nouvelle chaîne.
+      réellement détectée à la coupure de l'émetteur — non : voir dettes
+      techniques), puis rejouer la série E0 sur la nouvelle chaîne. E0.1
+      validé le 2026-10-20 (`doc/essais/E0.1_esp32.md`), E0.2 validé le
+      2026-10-28 (`doc/essais/E0.2.md`), suite à partir de E0.3.
 

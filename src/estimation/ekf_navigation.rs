@@ -148,9 +148,11 @@ impl EkfNavigation {
         let omega = omega_meas - bg;
         let q     = self.quat();
 
-        // Accélération NED = R(q)·a_corps − g
-        let a_ned = corps_vers_monde(&q, a_meas)
-                  - Vector3::nouveau(0.0, 0.0, G);
+        // L'accéléromètre est délivré en gravité apparente (opposé de la force
+        // spécifique, +g sur Z au repos — doc/calibration.md, « Repère ») :
+        // accélération NED = g − R(q)·a_mesurée
+        let a_ned = Vector3::nouveau(0.0, 0.0, G)
+                  - corps_vers_monde(&q, a_meas);
 
         // ── Propagation état ─────────────────────────────────────────────────
         let dt2h = 0.5 * dt * dt;
@@ -337,12 +339,12 @@ fn construire_f(q: &Quaternion, omega: Vector3, a_meas: Vector3, dt: f32) -> M13
     // ∂p/∂v = dt·I₃
     f[0][3] = dt; f[1][4] = dt; f[2][5] = dt;
 
-    // ∂p/∂q = (dt²/2)·J_Ra   et   ∂v/∂q = dt·J_Ra
+    // ∂p/∂q = −(dt²/2)·J_Ra   et   ∂v/∂q = −dt·J_Ra   (a_ned = g − R·a)
     let jra = jacobien_ra(q, a_meas);
     for i in 0..3 {
         for j in 0..4 {
-            f[i]  [6+j] = dt2h * jra[i][j];
-            f[3+i][6+j] = dt   * jra[i][j];
+            f[i]  [6+j] = -dt2h * jra[i][j];
+            f[3+i][6+j] = -dt   * jra[i][j];
         }
     }
 
@@ -590,6 +592,20 @@ mod tests {
         let e = ekf.etat();
         assert!(e.attitude.roulis.degres().abs()  < 0.5, "roulis  = {:.3}", e.attitude.roulis.degres());
         assert!(e.attitude.tangage.degres().abs() < 0.5, "tangage = {:.3}", e.attitude.tangage.degres());
+    }
+
+    #[test]
+    fn acceleration_vers_le_nez_fait_avancer_vers_le_nord() {
+        // Cap nord, à plat, +1 m/s² vers le nez : force spécifique (1, 0, −g)
+        // en repère corps, délivrée en gravité apparente (−1, 0, g).
+        let mut ekf = EkfNavigation::nouveau();
+        ekf.predire(Vector3::nouveau(0.0, 0.0, G), Vector3::zero(), 0.005);
+        for _ in 0..200 {
+            ekf.predire(Vector3::nouveau(-1.0, 0.0, G), Vector3::zero(), 0.005);
+        }
+        let v = ekf.etat().vitesse_ned;
+        assert!((v.x - 1.0).abs() < 0.01, "vitesse nord attendue 1 m/s, obtenue {:.3}", v.x);
+        assert!(v.y.abs() < 0.01 && v.z.abs() < 0.01, "vitesse {:?}", v);
     }
 
     #[test]

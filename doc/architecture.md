@@ -14,6 +14,7 @@ airhaum/
 │   ├── architecture.md             # ok: Architecture du projet 
 │   ├── gestion_du_temps.md         # ok: Doc de la gestion du temps
 │   ├── initialisation.md           # ok: Doc initialisation et calibration capteurs
+│   ├── calibration.md              # ok: Procédures de calibration et règles de validité
 │   ├── projet.md                   # ok: Doc générale du projet
 │   ├── essais/                     # ok: Comptes rendus d'essais (E0.1.md…)
 │   └── archives/                   # ok: Éléments abandonnés, conservés pour référence
@@ -55,8 +56,9 @@ airhaum/
 │   │   ├── mod.rs                  # ok
 │   │   ├── imu/                    # ok
 │   │   │   ├── mod.rs              # ok
-│   │   │   ├── mpu9250.rs          # ok: Driver MPU-9250 (accéléro, gyro, magnéto)
-│   │   │   └── calibration.rs      # ok
+│   │   │   ├── mpu9250.rs          # ok: Driver MPU-9250 (accéléro, gyro, magnéto), sortie en repère avion
+│   │   │   ├── calibration.rs      # ok: Calibrations persistantes (session, montage, magnétomètre)
+│   │   │   └── calcul_calibration.rs # ok: Calculs des calibrations (montage, décalage Z, tour au sol)
 │   │   ├── gps/                    # ok
 │   │   │   ├── mod.rs              # ok
 │   │   │   ├── ublox.rs            # ok: Driver u-blox NEO-M8N (init, lecture, config UART)

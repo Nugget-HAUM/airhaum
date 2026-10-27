@@ -33,8 +33,8 @@ pub fn afficher_menu(etat_vol: &EtatVol) {
     println!("  31. MPU9250 - Initialisation complète");
     println!("  32. MPU9250 - Mesure unique");
     println!("  33. MPU9250 - Mesures continues (10x)");
-    println!("  34. MPU9250 - Calibration gyroscope");
-    println!("  35. MPU9250 - Calibration magnétomètre");
+    println!("  34. MPU9250 - Calibration de session (gyroscope + Z, vérif. montage)");
+    println!("  35. MPU9250 - Calibration magnétomètre (tour au sol)");
     println!("  36. MPU9250 - Diagnostic complet");
     println!("  37. MPU9250 - Test fréquence (100 mesures)");
     println!("  4.  GPS     - État actuel (depuis thread)");

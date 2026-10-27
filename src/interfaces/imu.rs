@@ -21,23 +21,9 @@ pub trait CentraleInertielle: Send {
     /// Retourne gyro (rad/s), accel (m/s²), mag (µT), température.
     fn lire(&mut self) -> Result<DonneesImu>;
 
-    /// Calibre le gyroscope
-    ///
-    /// Le capteur doit être immobile pendant ~5 secondes.
-    /// Mesure et stocke les offsets sur chaque axe.
-    fn calibrer_gyro(&mut self) -> Result<()>;
-
-    /// Calibre l'accéléromètre
-    ///
-    /// Le capteur doit être posé sur une surface plane.
-    /// Mesure et stocke les offsets et facteurs d'échelle.
-    fn calibrer_accel(&mut self) -> Result<()>;
-
-    /// Calibre le magnétomètre
-    ///
-    /// Nécessite une procédure active (rotations lentes sur les 3 axes).
-    /// Calcule les corrections hard iron et soft iron.
-    fn calibrer_mag(&mut self) -> Result<()>;
+    // Les calibrations ne font pas partie de l'interface : ce sont des
+    // procédures interactives propres au matériel et à l'avion
+    // (`doc/calibration.md`, `diagnostiques/diag_mpu9250.rs`).
 
     /// Obtient l'état actuel du capteur
     fn obtenir_etat(&self) -> &EtatCapteur;

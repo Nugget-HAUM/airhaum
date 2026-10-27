@@ -5,6 +5,7 @@
 
 pub mod mpu9250;
 pub mod calibration;
+pub mod calcul_calibration;
 
 pub use mpu9250::{Mpu9250, ADRESSE_MPU9250, ADRESSE_MPU9250_ALT};
 pub use calibration::{CalibrationGyro, CalibrationAccel, CalibrationMag};

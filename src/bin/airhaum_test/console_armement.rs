@@ -183,8 +183,8 @@ pub async fn afficher_checklist_armement(
         };
 
         for (ok, nom, detail) in [
-            (gyro_ok,  "Calibration gyroscope",     gyro_detail.as_str()),
-            (accel_ok, "Calibration accéléromètre", accel_detail.as_str()),
+            (gyro_ok,  "Calibration session (gyro+Z)", gyro_detail.as_str()),
+            (accel_ok, "Calibration montage accél.",  accel_detail.as_str()),
             (baro_ok,  "Calibration baromètre",      baro_detail.as_str()),
             (estim_ok, "Estimation active (EKF)",    estim_detail.as_str()),
         ] {
