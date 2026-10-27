@@ -171,12 +171,12 @@ Sur perte du signal RC (aucune trame iBUS valide pendant plus de
 1 seconde), l'ESP32 force les gaz à zéro et remonte le flag
 `securite_rc_perdue` au Pi via la trame de remontée.
 
-**Point à valider en essai** : selon sa configuration, le récepteur peut
-continuer d'émettre des trames iBUS à la perte de la liaison radio
-(dernières valeurs ou valeurs de failsafe). Dans ce cas, l'ESP32 ne voit
-pas de perte RC. Le failsafe doit être configuré sur l'émetteur (gaz au
-minimum au moins), et le comportement vérifié en coupant l'émetteur
-(`doc/plan_essais.md`, E0.9).
+**Constaté (2026-10-20)** : à la perte de la liaison radio, le FS-iA6B
+continue d'émettre des trames iBUS avec les dernières valeurs reçues.
+L'ESP32 ne voit donc pas de perte RC : la détection ci-dessus ne se
+déclenche que si le récepteur lui-même cesse d'émettre (débranché, hors
+tension). Risque accepté pour l'instant, voir `doc/suivi_projet.md`
+(dettes techniques) ; à reprendre avant E0.9 (`doc/plan_essais.md`).
 
 Ce comportement conserve la capacité d'arrêt d'urgence via télécommande,
 qui constitue l'un des verrous de sécurité les plus importants du système.
