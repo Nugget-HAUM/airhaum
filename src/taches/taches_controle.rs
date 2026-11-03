@@ -51,6 +51,13 @@
 //! consigne gaz non nulle restée dans le canal `watch` après un
 //! désarmement (plan d'essais, E0.8 : coupure gaz sans délai).
 //!
+//! # Suspension des envois
+//!
+//! Cette tâche est le seul écrivain régulier de `tx_consignes_servo`. Le test
+//! des gouvernes (`console_test.rs`) en a besoin seul le temps de sa séquence :
+//! [`HandlesControle::suspendre_envois`] retient les envois, qui reprennent à
+//! la libération de [`SuspensionEnvois`], y compris si le test est interrompu.
+//!
 //! # Gel des contrôleurs inactifs
 //!
 //! Seul(s) le(s) contrôleur(s) actif(s) selon `PhaseControle` sont mis à
@@ -125,6 +132,8 @@ pub struct HandlesControle {
     tache: tokio::task::JoinHandle<()>,
     /// Signal d'arrêt partagé avec la tâche.
     arret: Arc<AtomicBool>,
+    /// Vrai tant qu'une [`SuspensionEnvois`] est active.
+    envois_suspendus: Arc<AtomicBool>,
 }
 
 impl HandlesControle {
@@ -132,6 +141,26 @@ impl HandlesControle {
     pub fn arreter(&self) {
         self.arret.store(true, Ordering::Relaxed);
         self.tache.abort();
+    }
+
+    /// Retient les envois vers les servos tant que la valeur retournée vit.
+    /// Réservé au test des gouvernes, hors armement.
+    pub fn suspendre_envois(&self) -> SuspensionEnvois {
+        self.envois_suspendus.store(true, Ordering::Relaxed);
+        SuspensionEnvois { envois_suspendus: Arc::clone(&self.envois_suspendus) }
+    }
+}
+
+/// Retourné par [`HandlesControle::suspendre_envois`] : les envois reprennent
+/// à sa libération.
+#[must_use]
+pub struct SuspensionEnvois {
+    envois_suspendus: Arc<AtomicBool>,
+}
+
+impl Drop for SuspensionEnvois {
+    fn drop(&mut self) {
+        self.envois_suspendus.store(false, Ordering::Relaxed);
     }
 }
 
@@ -175,7 +204,10 @@ pub fn lancer_controle(
     let (tx_consigne_gaz, rx_consigne_gaz) = watch::channel(ConsigneGaz::default());
     let (tx_arme, rx_arme) = watch::channel(false);
 
+    let envois_suspendus = Arc::new(AtomicBool::new(false));
+
     let arret_tache = Arc::clone(&arret);
+    let envois_suspendus_tache = Arc::clone(&envois_suspendus);
     let tache = tokio::spawn(async move {
         tache_controle(
             rx_navigation, rx_taux_corps, rx_phase,
@@ -183,7 +215,7 @@ pub fn lancer_controle(
             rx_consigne_gaz, rx_arme,
             tx_consignes_servo,
             controleur_direction_sol, controleur_roulis, controleur_tangage, controleur_lacet,
-            arret_tache,
+            arret_tache, envois_suspendus_tache,
         ).await;
     });
 
@@ -191,7 +223,7 @@ pub fn lancer_controle(
         tx_phase,
         tx_consigne_direction_sol, tx_consigne_roulis, tx_consigne_tangage, tx_consigne_lacet,
         tx_consigne_gaz, tx_arme,
-        tache, arret,
+        tache, arret, envois_suspendus,
     }
 }
 
@@ -216,6 +248,7 @@ async fn tache_controle(
     mut controleur_tangage: ControleurTangage,
     mut controleur_lacet: ControleurLacet,
     arret: Arc<AtomicBool>,
+    envois_suspendus: Arc<AtomicBool>,
 ) {
     let mut dernier_horodatage: Option<Horodatage> = None;
     let mut derniere_phase: Option<PhaseControle> = None;
@@ -285,7 +318,9 @@ async fn tache_controle(
                 let consigne_gaz = *rx_consigne_gaz.borrow();
                 let arme = *rx_arme.borrow();
                 let consignes_servos = mixer(&commandes, &consigne_gaz, arme);
-                let _ = tx_consignes_servo.send(consignes_servos);
+                if !envois_suspendus.load(Ordering::Relaxed) {
+                    let _ = tx_consignes_servo.send(consignes_servos);
+                }
             }
 
             else => break,
@@ -325,6 +360,34 @@ mod tests {
         );
 
         (tx_navigation, tx_taux_corps, rx_consignes_servo, handles)
+    }
+
+    #[tokio::test]
+    async fn suspension_laisse_la_consigne_du_test_en_place_puis_les_envois_reprennent() {
+        let (tx_navigation, rx_navigation) = watch::channel(EtatNavigation::nul());
+        let (_tx_taux_corps, rx_taux_corps) = watch::channel(Vector3::zero());
+        let (tx_consignes_servo, rx_consignes_servo) = watch::channel(ConsignesServos::neutre());
+        let (direction_sol, roulis, tangage, lacet) = controleurs_neutres();
+        let handles = lancer_controle(
+            rx_navigation, rx_taux_corps, tx_consignes_servo.clone(),
+            direction_sol, roulis, tangage, lacet,
+        );
+
+        let mut nav = EtatNavigation::nul();
+        nav.attitude.lacet = Angle::depuis_degres(90.0);
+
+        let suspension = handles.suspendre_envois();
+        tx_consignes_servo.send(ConsignesServos { direction: 1234, ..ConsignesServos::neutre() }).unwrap();
+        tx_navigation.send(nav).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(rx_consignes_servo.borrow().direction, 1234);
+
+        drop(suspension);
+        tx_navigation.send(nav).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_ne!(rx_consignes_servo.borrow().direction, 1234);
+
+        handles.arreter();
     }
 
     #[tokio::test]

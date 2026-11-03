@@ -116,6 +116,26 @@ impl EtatVol {
                 | EtatVol::Arrondi
         )
     }
+
+    /// Vrai si la mission considère le système armé, de `Armement` à
+    /// `Arrondi` inclus — voir `doc/mission.md`, « Armement dérivé de l'état
+    /// vol ». Ne dépend pas de la sécurité : une urgence retire l'autorisation
+    /// de gaz (`tx_arme`), pas le fait que la mission soit armée.
+    pub fn est_arme(&self) -> bool {
+        matches!(
+            self,
+            EtatVol::Armement
+                | EtatVol::RoulageAuSol
+                | EtatVol::CourseDecollage
+                | EtatVol::Montee
+                | EtatVol::VolLigneDroite
+                | EtatVol::Navigation
+                | EtatVol::AttenteEnCercle
+                | EtatVol::Approche
+                | EtatVol::Final
+                | EtatVol::Arrondi
+        )
+    }
 }
 
 impl fmt::Display for EtatVol {

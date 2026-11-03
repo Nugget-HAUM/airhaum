@@ -13,6 +13,7 @@ use tokio::sync::watch;
 use airhaum::mission::armement::SequencePrevol;
 use airhaum::mission::etat_machine::{CommandeVol, EtatVol};
 use airhaum::mission::plan_vol::{repertoire_plans_de_vol, PlanDeVol};
+use airhaum::taches::taches_controle::HandlesControle;
 use airhaum::taches::taches_estimation::HandlesEstimation;
 use airhaum::taches::taches_gps::HandlesGps;
 use airhaum::taches::taches_mission::HandlesMission;
@@ -110,6 +111,7 @@ pub async fn afficher_checklist_armement(
     estimation: &HandlesEstimation,
     gps: Option<&HandlesGps>,
     servo: &HandlesServo,
+    controle: &HandlesControle,
     surete: &HandlesSurete,
     sequence_prevol: &mut SequencePrevol,
     plan_charge: &mut Option<(String, PlanDeVol)>,
@@ -225,10 +227,10 @@ pub async fn afficher_checklist_armement(
         // survivre jusqu'à l'appel à ligne() — équipe sûreté/armement, à revoir si
         // ce bloc est retouché.
         let detail_prevol = if prevol_confirme {
-            "3/3 surfaces testées (min/max/neutre)".to_string()
+            "3/3 surfaces conformes".to_string()
         } else {
             format!(
-                "{}/3 surfaces testées — p. Lancer le test  ← BLOQUANT",
+                "{}/3 surfaces conformes — p. Lancer le test  ← BLOQUANT",
                 sequence_prevol.nombre_testees()
             )
         };
@@ -340,8 +342,9 @@ pub async fn afficher_checklist_armement(
             "q" | "Q" => return false,
             "g" | "G" if !gps_ok && !acquitte_gps => { acquitte_gps = true; }
             "m" | "M" if !mag_ok && !acquitte_mag => { acquitte_mag = true; }
-            "p" | "P" if !prevol_confirme => {
-                super::console_test::tester_debattements_servos(servo, sequence_prevol);
+            "p" | "P" => {
+                super::console_test::tester_debattements_servos(servo, controle, &etat_vol, sequence_prevol);
+                attendre_entree();
             }
             "v" | "V" => selectionner_plan_de_vol(plan_charge, &handles_mission.tx_plan),
             "a" | "A" if peut_armer => {

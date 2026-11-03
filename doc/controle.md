@@ -199,6 +199,23 @@ sur `arme` en aval, mais le mixeur ne doit pas laisser fuiter une
 consigne gaz non nulle restée dans le canal `watch` après un
 désarmement (plan d'essais, E0.8 : coupure gaz sans délai).
 
+**Sens des commandes** : les contrôleurs supposent qu'une commande positive
+augmente l'angle de la convention d'estimation (`doc/calibration.md`). Un sens
+inversé ferait diverger l'autopilote. Le sens de montage de chaque servo est
+porté par une constante du mixeur (`SENS_*`), seul endroit qui le connaît ; la
+vérification pré-vol des gouvernes passe par le mixeur et contrôle la chaîne
+complète à chaque armement (`mission/armement.rs`, plan d'essais E0.4).
+
+| Surface | Commande +1 | Observation, vu de l'arrière | Impulsion (relevé E0.4) |
+|---------|-------------|------------------------------|-------------------------|
+| Ailerons | Roulis à droite | Aileron droit levé, aileron gauche baissé | 2000 µs |
+| Profondeur | Cabrer | Gouverne levée | 1000 µs |
+| Direction | Nez à droite | Gouverne à droite | 1000 µs |
+
+Le mode manuel ne passe pas par le mixeur : l'ESP32 applique directement les
+canaux RC, et son sens se règle sur l'émetteur. Les deux réglages sont
+indépendants, l'un ne corrige jamais l'autre.
+
 ---
 
 ## Fréquences

@@ -15,7 +15,7 @@
 //! | IMU     | `HandlesEstimation::rx_attitude` | fraîcheur uniquement               |
 //! | GPS     | `HandlesGps::rx_gps`             | `valide` / `erreurs_consecutives`  |
 //! | Arduino | `HandlesServo::rx_etat`          | `rc_perdu` / `chien_de_garde`      |
-//! | Nano (mode) | `HandlesServo::rx_etat`      | retour en `Manuel` après un passage en `Autopilote` → `ArretUrgence` (voir `autopilote_deja_engage`, ci-dessous — le manuel est l'état de repos normal tant que l'autopilote n'a jamais été engagé) |
+//! | ESP32 (mode) | `HandlesServo::rx_etat`     | retour en `Manuel` après un passage en `Autopilote` **armé** → `ArretUrgence` (voir `autopilote_arme_engage`, ci-dessous — avant l'armement, SWA est libre : tout ce qui précède relève du contrôle) |
 //! | Console | `Arc<AtomicBool>` partagé avec `main.rs` | arrêt manuel opérateur (appoint) |
 //!
 //! # Vivacité des threads
@@ -93,12 +93,16 @@ impl HandlesSurete {
 /// désactive toute vérification tant que les valeurs réelles du terrain de
 /// vol ne sont pas connues).
 ///
+/// `rx_mission_armee` indique si la mission est armée (`EtatVol::est_arme`,
+/// publié par `taches_mission`). Simple information en lecture : la mission
+/// ne commande jamais la sécurité.
+///
 /// `arret_urgence_console` est un drapeau partagé avec `main.rs` : le
 /// positionner à `true` (ex. touche dédiée de la console) force
 /// `EtatSecurite::ArretUrgence` dès le prochain cycle. Solution d'appoint
 /// pour les premiers vols rapprochés — le canal de sécurité principal reste
-/// le RC/Nano (voir `mode_manuel_rc` dans `surete::urgences`), qui coupe les
-/// gaz au niveau matériel indépendamment du logiciel.
+/// le RC/ESP32 (voir `mode_manuel_rc` dans `surete::urgences`), qui rend la
+/// main à l'opérateur, gaz inclus, indépendamment du logiciel du Pi.
 ///
 /// Doit être appelé depuis un contexte Tokio (après `#[tokio::main]`).
 pub fn lancer_surete(
@@ -108,6 +112,7 @@ pub fn lancer_surete(
     rx_navigation: watch::Receiver<EtatNavigation>,
     rx_gps: watch::Receiver<MesureGps>,
     rx_etat_arduino: watch::Receiver<EtatArduino>,
+    rx_mission_armee: watch::Receiver<bool>,
     limites: LimitesVol,
     arret_urgence_console: Arc<AtomicBool>,
 ) -> HandlesSurete {
@@ -118,7 +123,7 @@ pub fn lancer_surete(
     let tache = tokio::spawn(async move {
         tache_surete(
             rx_baro, rx_telem, rx_attitude, rx_navigation, rx_gps, rx_etat_arduino,
-            limites, arret_urgence_console, tx_securite, arret_tache,
+            rx_mission_armee, limites, arret_urgence_console, tx_securite, arret_tache,
         ).await;
     });
 
@@ -136,6 +141,7 @@ async fn tache_surete(
     rx_navigation: watch::Receiver<EtatNavigation>,
     mut rx_gps: watch::Receiver<MesureGps>,
     mut rx_etat_arduino: watch::Receiver<EtatArduino>,
+    rx_mission_armee: watch::Receiver<bool>,
     limites: LimitesVol,
     arret_urgence_console: Arc<AtomicBool>,
     tx_securite: watch::Sender<EtatSecurite>,
@@ -148,13 +154,12 @@ async fn tache_surete(
     let mut mon_arduino = MoniteurSante::nouveau("arduino", PEREMPTION_ARDUINO);
     let mut mae = MaeSecurite::nouveau();
 
-    // Latch : devient vrai dès que le Nano a rapporté le mode Autopilote au
-    // moins une fois. Tant qu'il ne l'a jamais fait (sol, checklist, MAÉ vol
-    // encore en `AttenteArmement`), le mode Manuel est l'état de repos
-    // normal du Nano et ne doit pas déclencher d'arrêt d'urgence — seul un
-    // *retour* au manuel après un passage en autopilote signale une vraie
-    // reprise en main.
-    let mut autopilote_deja_engage = false;
+    // Latch : devient vrai dès que l'ESP32 rapporte le mode Autopilote alors
+    // que la mission est armée, et retombe au désarmement. Avant l'armement,
+    // SWA est libre (contrôles, test des gouvernes) et ne doit pas déclencher
+    // d'arrêt d'urgence — seul un *retour* au manuel après un passage en
+    // autopilote armé signale une vraie reprise en main.
+    let mut autopilote_arme_engage = false;
 
     let mut tick = interval(Duration::from_millis(PERIODE_MS));
 
@@ -198,8 +203,10 @@ async fn tache_surete(
             true,
         );
 
-        if etat_arduino.mode == ModeArduino::Autopilote {
-            autopilote_deja_engage = true;
+        if !*rx_mission_armee.borrow() {
+            autopilote_arme_engage = false;
+        } else if etat_arduino.mode == ModeArduino::Autopilote {
+            autopilote_arme_engage = true;
         }
 
         let nav = *rx_navigation.borrow();
@@ -218,7 +225,7 @@ async fn tache_surete(
             limites: &etat_limites,
             lora_perdue: None,
             arret_urgence_sol: Some(arret_urgence_console.load(Ordering::Relaxed)),
-            mode_manuel_rc: autopilote_deja_engage.then_some(etat_arduino.mode == ModeArduino::Manuel),
+            mode_manuel_rc: autopilote_arme_engage.then_some(etat_arduino.mode == ModeArduino::Manuel),
             tension_batterie_v: None,
         };
 
@@ -262,25 +269,26 @@ mod tests {
         EtatArduino { mode, rc_perdu: false, chien_de_garde: false, ..EtatArduino::absent() }
     }
 
-    fn lancer_test(etat_initial_arduino: EtatArduino) -> (watch::Sender<EtatArduino>, HandlesSurete) {
+    fn lancer_test(etat_initial_arduino: EtatArduino) -> (watch::Sender<EtatArduino>, watch::Sender<bool>, HandlesSurete) {
         let (_tx_baro, rx_baro) = watch::channel(MesureBaro { donnees: None, valide: true, erreurs_consecutives: 0 });
         let (_tx_telem, rx_telem) = watch::channel(MesureTelem { distance_mm: None, valide: true, erreurs_consecutives: 0 });
         let (_tx_attitude, rx_attitude) = watch::channel(Attitude::nulle());
         let (_tx_nav, rx_nav) = watch::channel(navigation_sans_origine());
         let (_tx_gps, rx_gps) = watch::channel(MesureGps { donnees: None, valide: true, erreurs_consecutives: 0 });
         let (tx_arduino, rx_arduino) = watch::channel(etat_initial_arduino);
+        let (tx_mission_armee, rx_mission_armee) = watch::channel(false);
 
         let handles = lancer_surete(
-            rx_baro, rx_telem, rx_attitude, rx_nav, rx_gps, rx_arduino,
+            rx_baro, rx_telem, rx_attitude, rx_nav, rx_gps, rx_arduino, rx_mission_armee,
             LimitesVol::default(), Arc::new(AtomicBool::new(false)),
         );
 
-        (tx_arduino, handles)
+        (tx_arduino, tx_mission_armee, handles)
     }
 
     #[tokio::test]
     async fn mode_manuel_au_repos_sans_autopilote_prealable_ne_declenche_pas_arret() {
-        let (_tx_arduino, mut handles) = lancer_test(arduino(ModeArduino::Manuel));
+        let (_tx_arduino, _tx_mission_armee, mut handles) = lancer_test(arduino(ModeArduino::Manuel));
 
         tokio::time::sleep(Duration::from_millis(350)).await;
 
@@ -289,8 +297,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retour_manuel_apres_autopilote_declenche_arret_urgence() {
-        let (tx_arduino, mut handles) = lancer_test(arduino(ModeArduino::Autopilote));
+    async fn bascules_non_arme_ne_declenchent_pas_arret() {
+        let (tx_arduino, _tx_mission_armee, mut handles) = lancer_test(arduino(ModeArduino::Autopilote));
+
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        tx_arduino.send(arduino(ModeArduino::Manuel)).unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        assert_eq!(*handles.rx_securite.borrow_and_update(), EtatSecurite::Normal);
+        handles.arreter();
+    }
+
+    #[tokio::test]
+    async fn etat_absent_au_demarrage_ne_declenche_pas_arret() {
+        // `EtatArduino::absent()` vaut Autopilote : la première trame reçue en
+        // manuel ne doit pas être prise pour une reprise en main. Il vaut aussi
+        // RC perdu : une alerte mineure transitoire reste donc normale ici.
+        let (tx_arduino, _tx_mission_armee, mut handles) = lancer_test(EtatArduino::absent());
+
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        tx_arduino.send(arduino(ModeArduino::Manuel)).unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        assert!(!handles.rx_securite.borrow_and_update().est_critique());
+        handles.arreter();
+    }
+
+    #[tokio::test]
+    async fn retour_manuel_apres_autopilote_arme_declenche_arret_urgence() {
+        let (tx_arduino, tx_mission_armee, mut handles) = lancer_test(arduino(ModeArduino::Autopilote));
+        tx_mission_armee.send(true).unwrap();
 
         // Laisser la tâche voir au moins un cycle en Autopilote avant le retour au manuel.
         tokio::time::sleep(Duration::from_millis(150)).await;
@@ -298,6 +334,50 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(150)).await;
 
         assert!(matches!(*handles.rx_securite.borrow_and_update(), EtatSecurite::ArretUrgence { .. }));
+        handles.arreter();
+    }
+
+    #[tokio::test]
+    async fn arme_en_manuel_sans_passage_en_autopilote_ne_declenche_pas_arret() {
+        let (_tx_arduino, tx_mission_armee, mut handles) = lancer_test(arduino(ModeArduino::Manuel));
+        tx_mission_armee.send(true).unwrap();
+
+        tokio::time::sleep(Duration::from_millis(350)).await;
+
+        assert_eq!(*handles.rx_securite.borrow_and_update(), EtatSecurite::Normal);
+        handles.arreter();
+    }
+
+    #[tokio::test]
+    async fn retour_en_autopilote_leve_l_arret_urgence() {
+        let (tx_arduino, tx_mission_armee, mut handles) = lancer_test(arduino(ModeArduino::Autopilote));
+        tx_mission_armee.send(true).unwrap();
+
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        tx_arduino.send(arduino(ModeArduino::Manuel)).unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(handles.rx_securite.borrow_and_update().est_critique());
+
+        // Volonté de l'opérateur : rendre la main à l'autopilote, gaz inclus (doc/surete.md).
+        tx_arduino.send(arduino(ModeArduino::Autopilote)).unwrap();
+        tokio::time::sleep(Duration::from_millis(1300)).await;
+        assert!(!handles.rx_securite.borrow_and_update().est_critique());
+
+        handles.arreter();
+    }
+
+    #[tokio::test]
+    async fn desarmement_rend_swa_libre() {
+        let (tx_arduino, tx_mission_armee, mut handles) = lancer_test(arduino(ModeArduino::Autopilote));
+        tx_mission_armee.send(true).unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        tx_mission_armee.send(false).unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        tx_arduino.send(arduino(ModeArduino::Manuel)).unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        assert_eq!(*handles.rx_securite.borrow_and_update(), EtatSecurite::Normal);
         handles.arreter();
     }
 }

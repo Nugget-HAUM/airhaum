@@ -2,9 +2,11 @@
 //! Console de test — menu interactif et fonctions de visualisation en temps réel.
 
 use std::io::{self, Write};
+use airhaum::drivers::controleur_servo::ConsignesServos;
 use airhaum::mission::armement::{SequencePrevol, SurfaceServo};
 use airhaum::mission::etat_machine::EtatVol;
 use airhaum::taches::taches_capteurs::HandlesCapteurs;
+use airhaum::taches::taches_controle::HandlesControle;
 use airhaum::taches::taches_estimation::HandlesEstimation;
 use airhaum::taches::taches_gps::HandlesGps;
 use airhaum::taches::taches_servo::HandlesServo;
@@ -43,7 +45,7 @@ pub fn afficher_menu(etat_vol: &EtatVol) {
     println!("  43. GPS     - Sauvegarder assistance (position + orbites)");
     println!("  44. GPS     - Campagne de mesure statique (log boîte noire)");
     println!("  5.  ESP32 - État liaison et RC");
-    println!("  51. ESP32 - Test servos (débattements)");
+    println!("  51. ESP32 - Vérification pré-vol des gouvernes");
     println!("  52. ESP32 - Campagne de diagnostic RC (log boîte noire)");
     println!("  6.  LoRa    - Test communication SPI (SX1276)");
     println!("  61. LoRa    - Envoi \"Hello LoRa!\" de test (à comparer côté Wemos/PC)");
@@ -543,78 +545,140 @@ pub async fn campagne_arduino(servo: &HandlesServo) {
     println!("  Voir la boîte noire (target=\"arduino_campagne\") pour le post-traitement.");
 }
 
-/// Test interactif des débattements des surfaces de vol.
+/// Période de surveillance de SWA et de renvoi des consignes pendant le test.
+const PERIODE_TEST_GOUVERNES_MS: i32 = 100;
+
+/// Vrai si l'entrée standard a une ligne à lire, en attendant au plus `delai_ms`.
+fn entree_disponible(delai_ms: i32) -> bool {
+    let mut descripteur = libc::pollfd { fd: libc::STDIN_FILENO, events: libc::POLLIN, revents: 0 };
+    unsafe { libc::poll(&mut descripteur, 1, delai_ms) > 0 }
+}
+
+/// Lit une ligne sur l'entrée standard, en minuscules. Fin de flux → `q`.
+fn lire_reponse() -> String {
+    let mut reponse = String::new();
+    match io::stdin().read_line(&mut reponse) {
+        Ok(n) if n > 0 => reponse.trim().to_lowercase(),
+        _ => "q".to_string(),
+    }
+}
+
+/// Vrai si l'ESP32 applique les consignes du Pi aux gouvernes.
+fn esp32_applique_consignes(servo: &HandlesServo) -> bool {
+    use airhaum::drivers::controleur_servo::ModeArduino;
+    let etat = servo.rx_etat.borrow();
+    etat.mode == ModeArduino::Autopilote && !etat.rc_perdu
+}
+
+/// Attend la réponse de l'opérateur en maintenant `consignes`. Le renvoi
+/// périodique couvre un envoi de la tâche contrôle déjà en cours au moment de
+/// la suspension. `None` si l'ESP32 cesse d'appliquer les consignes : SWA
+/// repassé en manuel, ou RC perdu.
+fn attendre_reponse(servo: &HandlesServo, consignes: &ConsignesServos) -> Option<String> {
+    loop {
+        if !esp32_applique_consignes(servo) {
+            return None;
+        }
+        let _ = servo.tx_consignes.send(consignes.clone());
+        if entree_disponible(PERIODE_TEST_GOUVERNES_MS) {
+            return Some(lire_reponse());
+        }
+    }
+}
+
+/// Test des gouvernes : séquence guidée, avec une réponse explicite de
+/// l'opérateur à chaque position attendue (`SurfaceServo::etapes`). Seul `o`
+/// valide ; Entrée seule ne valide rien.
 ///
-/// Envoie min/max/neutre pour chaque surface successivement en mode non armé
-/// (gaz verrouillés à zéro par le Nano). L'opérateur confirme visuellement
-/// que chaque surface s'actionne dans le bon sens.
-pub fn tester_debattements_servos(servo: &HandlesServo, sequence: &mut SequencePrevol) {
+/// Exige SWA en autopilote (en manuel, l'ESP32 ignore le Pi) et un système non
+/// armé. Pendant la séquence, la tâche contrôle n'envoie plus rien
+/// (`HandlesControle::suspendre_envois`) et les gaz restent au minimum.
+pub fn tester_debattements_servos(
+    servo: &HandlesServo,
+    controle: &HandlesControle,
+    etat_vol: &EtatVol,
+    sequence: &mut SequencePrevol,
+) {
     use std::sync::atomic::Ordering;
-    use airhaum::drivers::controleur_servo::{ConsignesServos, IMPULSION_MIN_US, IMPULSION_NEUTRE_US, IMPULSION_MAX_US};
 
-    println!("\n── Test débattements servos ───────────────────────────────────────");
-    println!("  Mode non armé — gaz verrouillés à zéro par le Nano.");
-    println!("  Observez que chaque surface s'actionne dans le bon sens.");
-    println!("  [Entrée] confirmer et passer à l'étape suivante, q annuler.\n");
+    println!("\n── Vérification pré-vol des gouvernes ──────────────");
 
+    if etat_vol.est_arme() {
+        println!("  ✗ Test impossible : système armé ({}).", etat_vol);
+        return;
+    }
     if !servo.liaison_detectee.load(Ordering::Relaxed) {
-        println!("  ⚠  Aucune liaison ESP32 détectée — les consignes seront envoyées sans confirmation de réception.\n");
+        println!("  ✗ Test impossible : aucune liaison avec l'ESP32.");
+        return;
     }
 
-    let surfaces: &[(&str, fn(u16) -> ConsignesServos)] = &[
-        ("Ailerons",   |v| ConsignesServos { ailerons: v, profondeur: IMPULSION_NEUTRE_US, gaz: IMPULSION_MIN_US, direction: IMPULSION_NEUTRE_US, arme: false }),
-        ("Profondeur", |v| ConsignesServos { ailerons: IMPULSION_NEUTRE_US, profondeur: v, gaz: IMPULSION_MIN_US, direction: IMPULSION_NEUTRE_US, arme: false }),
-        ("Direction",  |v| ConsignesServos { ailerons: IMPULSION_NEUTRE_US, profondeur: IMPULSION_NEUTRE_US, gaz: IMPULSION_MIN_US, direction: v, arme: false }),
-    ];
+    println!("  Gaz maintenus à zéro pendant tout le test.");
+    println!("  Répondre o (conforme), n (écart) ou q (abandon).");
 
-    loop {
-        println!("  Choisir la surface à tester :");
-        for (i, (nom, _)) in surfaces.iter().enumerate() {
-            println!("    {}. {}", i + 1, nom);
+    // Rejouer le test remet l'item à KO : seul le dernier passage fait foi.
+    *sequence = SequencePrevol::nouvelle();
+    let _suspension = controle.suspendre_envois();
+    let neutre = ConsignesServos::neutre();
+
+    if !esp32_applique_consignes(servo) {
+        println!("\n  SWA : MANUEL → passez en AUTOPILOTE pour commencer (q pour abandonner)…");
+    }
+    while !esp32_applique_consignes(servo) {
+        let _ = servo.tx_consignes.send(neutre.clone());
+        if entree_disponible(PERIODE_TEST_GOUVERNES_MS) && lire_reponse() == "q" {
+            println!("  Test abandonné — item non validé.");
+            return;
         }
-        println!("    q. Quitter le test");
-        print!("  Votre choix : ");
-        io::stdout().flush().unwrap();
+    }
 
-        let mut choix = String::new();
-        io::stdin().read_line(&mut choix).unwrap();
-        let choix = choix.trim();
+    for (rang, surface) in SurfaceServo::TOUTES.into_iter().enumerate() {
+        println!("\n[{}/{}] {} — placez-vous derrière l'avion", rang + 1, SurfaceServo::TOUTES.len(), surface.nom());
+        let mut conforme = true;
 
-        let idx = match choix {
-            "q" | "Q" => break,
-            "1" => 0,
-            "2" => 1,
-            "3" => 2,
-            _ => { println!("  Choix invalide."); continue; }
-        };
-        let surface = [SurfaceServo::Ailerons, SurfaceServo::Profondeur, SurfaceServo::Direction][idx];
-
-        let (nom, mk) = &surfaces[idx];
-        println!("  Test {} — minimum puis maximum puis neutre.", nom);
-
-        for (label, val) in [
-            ("minimum", IMPULSION_MIN_US),
-            ("maximum", IMPULSION_MAX_US),
-            ("neutre",  IMPULSION_NEUTRE_US),
-        ] {
-            let _ = servo.tx_consignes.send(mk(val));
-            print!("  {} → {} ({} µs)  [Entrée] pour continuer : ", nom, label, val);
-            io::stdout().flush().unwrap();
-            let mut input = String::new();
-            io::stdin().read_line(&mut input).unwrap();
-            if input.trim().eq_ignore_ascii_case("q") {
-                let _ = servo.tx_consignes.send(ConsignesServos::neutre());
-                println!("  Test interrompu — servos repositionnés au neutre.");
-                return;
+        for etape in surface.etapes() {
+            println!("  Commande : {}", etape.commande);
+            println!("  Attendu  : {}", etape.attendu);
+            let consignes = etape.consignes();
+            loop {
+                print!("  Position tenue ? Conforme ? (o/n) : ");
+                io::stdout().flush().unwrap();
+                match attendre_reponse(servo, &consignes).as_deref() {
+                    None => {
+                        let _ = servo.tx_consignes.send(neutre.clone());
+                        log::warn!(target: "mission", "Test gouvernes interrompu : ESP32 hors autopilote");
+                        println!("\n  ✗ SWA hors autopilote ou RC perdu — test interrompu, item non validé.");
+                        return;
+                    }
+                    Some("o") => break,
+                    Some("n") => {
+                        conforme = false;
+                        log::warn!(target: "mission", "Test gouvernes : écart sur {} — commande {}, attendu {}",
+                            surface.nom(), etape.commande, etape.attendu);
+                        break;
+                    }
+                    Some("q") => {
+                        let _ = servo.tx_consignes.send(neutre.clone());
+                        println!("  Test abandonné — gouvernes au neutre, item non validé.");
+                        return;
+                    }
+                    Some(_) => {}
+                }
             }
         }
-        let _ = servo.tx_consignes.send(ConsignesServos::neutre());
-        sequence.marquer_testee(surface);
-        println!("  {} repositionné au neutre. ({}/3 surfaces validées)\n", nom, sequence.nombre_testees());
+
+        let _ = servo.tx_consignes.send(neutre.clone());
+        if conforme {
+            sequence.marquer_testee(surface);
+            log::info!(target: "mission", "Test gouvernes : {} conforme", surface.nom());
+            println!("  ✓ {} conforme", surface.nom());
+        } else {
+            println!("  ✗ {} : écart à corriger", surface.nom());
+        }
     }
 
-    let _ = servo.tx_consignes.send(ConsignesServos::neutre());
-    println!("  Fin du test — servos au neutre.");
+    println!("\n── Résultat : {}/{} surfaces conformes{} ──",
+        sequence.nombre_testees(), SurfaceServo::TOUTES.len(),
+        if sequence.complete() { "" } else { " — item non validé" });
 }
 
 /// Affiche l'état en temps réel des threads capteurs depuis les canaux.

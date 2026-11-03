@@ -53,6 +53,17 @@ ne se mettent pas à jour tout seuls.
 ---
 
 ## Dettes techniques
+- [ ] **Roue de queue** (constaté le 2026-11-03, `doc/essais/E0.4.md`) : elle
+  forçait sur la mécanique de direction. Tringlerie réglée le même jour ; à
+  revérifier en charge. Réglage mécanique, pas de correction logicielle.
+  **À faire avant les essais de roulage (E1).**
+
+- [ ] **GPS : deux réinitialisations à chaque lancement** (constaté le
+  2026-11-03). Détection `Aucun` à 9600 bauds, deux fois, puis `Nmea` environ
+  25 s après le lancement, y compris avec le Pi allumé depuis 19 minutes.
+  Conséquences : `AlerteMajeure` pendant environ 15 s, donc armement bloqué,
+  puis « Rétabli après incident » pour toute la session. Cause non établie.
+
 - [ ] ** Fréquence cilbe ** le drivers MPU tourne a 125-110hz et non 200 comme visé
 
 - [ ] **ESP32 : surfaces non mises à plat sur chien de garde / perte RC en
@@ -249,5 +260,6 @@ ne se mettent pas à jour tout seuls.
       réellement détectée à la coupure de l'émetteur — non : voir dettes
       techniques), puis rejouer la série E0 sur la nouvelle chaîne. E0.1
       validé le 2026-10-20 (`doc/essais/E0.1_esp32.md`), E0.2 validé le
-      2026-10-28 (`doc/essais/E0.2.md`), suite à partir de E0.3.
+      2026-10-28 (`doc/essais/E0.2.md`), critères de E0.4 atteints le
+      2026-11-03 (`doc/essais/E0.4.md`), suite à partir de E0.3.
 

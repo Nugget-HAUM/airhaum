@@ -100,7 +100,9 @@ impl HandlesMission {
 /// - `rx_altitude`                : canal cloné depuis `HandlesEstimation::rx_altitude`.
 /// - `tx_phase`/`tx_consigne_direction_sol`/`tx_consigne_gaz`/`tx_arme` : canaux clonés
 ///   depuis `HandlesControle`.
-/// - `altitude_cible_m`           : configuration de mission — valeur fixe pour l'instant,
+/// - `tx_mission_armee`           : état armé de la mission, indépendant de la sécurité
+///   (`EtatVol::est_arme`), lu par `taches_surete` — voir `doc/surete.md`.
+/// - `altitude_cible_m`          : configuration de mission — valeur fixe pour l'instant,
 ///   voir `doc/mission.md` (hors périmètre de cette brique).
 /// - `commande_operateur_segment` : drapeau partagé avec la console, consommé par un
 ///   segment à condition `ConditionFin::CommandeOperateur` (`doc/plan_de_vol.md`) —
@@ -116,6 +118,7 @@ pub fn lancer_mission(
     tx_consigne_direction_sol: watch::Sender<ConsigneDirectionSol>,
     tx_consigne_gaz: watch::Sender<ConsigneGaz>,
     tx_arme: watch::Sender<bool>,
+    tx_mission_armee: watch::Sender<bool>,
     altitude_cible_m: f32,
     commande_operateur_segment: Arc<AtomicBool>,
 ) -> HandlesMission {
@@ -129,7 +132,7 @@ pub fn lancer_mission(
         tache_mission(
             rx_securite, rx_navigation, rx_altitude, rx_commande, rx_plan,
             tx_etat_vol, tx_phase, tx_consigne_direction_sol, tx_consigne_gaz, tx_arme,
-            altitude_cible_m, commande_operateur_segment,
+            tx_mission_armee, altitude_cible_m, commande_operateur_segment,
             arret_tache,
         ).await;
     });
@@ -156,19 +159,7 @@ fn doit_etre_arme(etat: &EtatVol, securite: &EtatSecurite) -> bool {
     if matches!(securite, EtatSecurite::ArretUrgence { .. } | EtatSecurite::AtterrissageUrgence { .. }) {
         return false;
     }
-    matches!(
-        etat,
-        EtatVol::Armement
-            | EtatVol::RoulageAuSol
-            | EtatVol::CourseDecollage
-            | EtatVol::Montee
-            | EtatVol::VolLigneDroite
-            | EtatVol::Navigation
-            | EtatVol::AttenteEnCercle
-            | EtatVol::Approche
-            | EtatVol::Final
-            | EtatVol::Arrondi
-    )
+    etat.est_arme()
 }
 
 /// Vrai si l'état courant exécute le plan de vol — voir `doc/mission.md`,
@@ -189,6 +180,7 @@ async fn tache_mission(
     tx_consigne_direction_sol: watch::Sender<ConsigneDirectionSol>,
     tx_consigne_gaz: watch::Sender<ConsigneGaz>,
     tx_arme: watch::Sender<bool>,
+    tx_mission_armee: watch::Sender<bool>,
     altitude_cible_m: f32,
     commande_operateur_segment: Arc<AtomicBool>,
     arret: Arc<AtomicBool>,
@@ -232,7 +224,10 @@ async fn tache_mission(
             altitude_m: altitude.altitude_m,
             altitude_cible_m,
             hauteur_sol_mm: altitude.hauteur_sol_mm,
-            estimation_prete: nav.origine_definie,
+            // Une première publication suffit : le récepteur n'est jamais
+            // marqué lu ici. Le GPS n'y entre pas, il reste acquittable à la
+            // check-liste (doc/mission.md).
+            estimation_prete: rx_navigation.has_changed().unwrap_or(false),
         };
         mae.tick(&ctx);
 
@@ -247,6 +242,7 @@ async fn tache_mission(
 
         // 6. Armement dérivé de l'état — et de la sécurité (voir doit_etre_arme).
         let _ = tx_arme.send(doit_etre_arme(&etat, &securite));
+        let _ = tx_mission_armee.send(etat.est_arme());
 
         // 7. Plan de vol — uniquement en RoulageAuSol/CourseDecollage.
         let executer = execute_plan_de_vol(&etat);
@@ -326,6 +322,7 @@ fin = { commande_operateur = "console" }
         rx_consigne_direction_sol: watch::Receiver<ConsigneDirectionSol>,
         rx_consigne_gaz: watch::Receiver<ConsigneGaz>,
         rx_arme: watch::Receiver<bool>,
+        rx_mission_armee: watch::Receiver<bool>,
         commande_operateur_segment: Arc<AtomicBool>,
         handles: HandlesMission,
     }
@@ -351,17 +348,18 @@ fin = { commande_operateur = "console" }
         );
         let (tx_consigne_gaz, rx_consigne_gaz) = watch::channel(ConsigneGaz::default());
         let (tx_arme, rx_arme) = watch::channel(false);
+        let (tx_mission_armee, rx_mission_armee) = watch::channel(false);
         let commande_operateur_segment = Arc::new(AtomicBool::new(false));
 
         let handles = lancer_mission(
             rx_securite, rx_navigation, rx_altitude,
-            tx_phase, tx_consigne_direction_sol, tx_consigne_gaz, tx_arme,
+            tx_phase, tx_consigne_direction_sol, tx_consigne_gaz, tx_arme, tx_mission_armee,
             100.0, Arc::clone(&commande_operateur_segment),
         );
 
         Bancs {
             tx_securite, tx_navigation, tx_altitude,
-            rx_phase, rx_consigne_direction_sol, rx_consigne_gaz, rx_arme,
+            rx_phase, rx_consigne_direction_sol, rx_consigne_gaz, rx_arme, rx_mission_armee,
             commande_operateur_segment, handles,
         }
     }
@@ -378,6 +376,40 @@ fin = { commande_operateur = "console" }
         b.handles.tx_commande.send(CommandeVol::Armer).await.unwrap();
         b.handles.tx_commande.send(CommandeVol::ArmementValide).await.unwrap();
         tokio::time::sleep(Duration::from_millis(120)).await;
+    }
+
+    #[tokio::test]
+    async fn attente_armement_exige_l_estimation_mais_pas_le_gps() {
+        let b = lancer_test(plan_deux_segments());
+        b.handles.tx_commande.send(CommandeVol::DriversInitialises).await.unwrap();
+        b.handles.tx_commande.send(CommandeVol::ConfigurationTerminee).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert_eq!(*b.handles.rx_etat_vol.borrow(), EtatVol::AutoTest);
+
+        // Première publication de l'estimation, sans fix GPS (origine non définie).
+        b.tx_navigation.send(EtatNavigation::nul()).unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(*b.handles.rx_etat_vol.borrow(), EtatVol::AttenteArmement);
+
+        b.handles.arreter();
+    }
+
+    #[tokio::test]
+    async fn mission_armee_ne_depend_pas_de_la_securite() {
+        let b = lancer_test(plan_deux_segments());
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        assert!(!*b.rx_mission_armee.borrow());
+
+        amener_a_roulage_au_sol(&b).await;
+        assert!(*b.rx_mission_armee.borrow());
+
+        // Une urgence retire l'autorisation de gaz, pas l'état armé de la mission.
+        b.tx_securite.send(EtatSecurite::ArretUrgence { raison: "test".into() }).unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(!*b.rx_arme.borrow());
+        assert!(*b.rx_mission_armee.borrow());
+
+        b.handles.arreter();
     }
 
     #[tokio::test]

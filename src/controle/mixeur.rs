@@ -4,10 +4,21 @@
 //! Avion classique à 3 gouvernes indépendantes (pas de V-tail ni flying
 //! wing) : mixage trivial 1:1 par axe, aucun couplage à gérer. Voir
 //! `doc/controle.md`.
+//!
+//! Seul le mixeur connaît le sens de montage des servos : pour le reste du
+//! système, une commande positive augmente l'angle correspondant (roulis à
+//! droite, nez haut, nez à droite). Voir `doc/controle.md`, « Sens des
+//! commandes ».
 
 use crate::drivers::controleur_servo::{
     ConsignesServos, IMPULSION_MAX_US, IMPULSION_MIN_US, IMPULSION_NEUTRE_US,
 };
+
+/// Sens de montage des servos, relevés à l'essai (`doc/essais/E0.4.md`) :
+/// -1 si une impulsion croissante produit l'effet inverse de la convention.
+const SENS_AILERONS: f32 = 1.0;
+const SENS_PROFONDEUR: f32 = -1.0;
+const SENS_DIRECTION: f32 = -1.0;
 
 /// Demi-plage de débattement autour du neutre (µs).
 const DEMI_PLAGE_US: f32 = (IMPULSION_MAX_US - IMPULSION_MIN_US) as f32 / 2.0;
@@ -60,10 +71,10 @@ fn gaz_normalise_vers_us(gaz: f32) -> u16 {
 /// d'essais, E0.8 : coupure gaz sans délai).
 pub fn mixer(commandes: &CommandesNormalisees, consigne_gaz: &ConsigneGaz, arme: bool) -> ConsignesServos {
     ConsignesServos {
-        ailerons:   normalisee_vers_us(commandes.ailerons),
-        profondeur: normalisee_vers_us(commandes.profondeur),
+        ailerons:   normalisee_vers_us(SENS_AILERONS * commandes.ailerons),
+        profondeur: normalisee_vers_us(SENS_PROFONDEUR * commandes.profondeur),
         gaz:        if arme { gaz_normalise_vers_us(consigne_gaz.gaz) } else { IMPULSION_MIN_US },
-        direction:  normalisee_vers_us(commandes.direction),
+        direction:  normalisee_vers_us(SENS_DIRECTION * commandes.direction),
         arme,
     }
 }
@@ -111,10 +122,21 @@ mod tests {
         let consignes = mixer(&commandes, &ConsigneGaz { gaz: 0.5 }, true);
 
         assert_eq!(consignes.ailerons, IMPULSION_NEUTRE_US + (DEMI_PLAGE_US * 0.5) as u16);
-        assert_eq!(consignes.profondeur, IMPULSION_NEUTRE_US - (DEMI_PLAGE_US * 0.5) as u16);
-        assert_eq!(consignes.direction, IMPULSION_MAX_US);
+        assert_eq!(consignes.profondeur, IMPULSION_NEUTRE_US + (DEMI_PLAGE_US * 0.5) as u16);
+        assert_eq!(consignes.direction, IMPULSION_MIN_US);
         assert_eq!(consignes.gaz, IMPULSION_MIN_US + (PLAGE_US * 0.5) as u16);
         assert!(consignes.arme);
+    }
+
+    #[test]
+    fn sens_de_montage_releves_a_l_essai() {
+        // doc/essais/E0.4.md : profondeur et direction montées à l'envers.
+        let commandes = CommandesNormalisees { ailerons: 1.0, profondeur: 1.0, direction: 1.0 };
+        let consignes = mixer(&commandes, &ConsigneGaz::default(), false);
+
+        assert_eq!(consignes.ailerons, IMPULSION_MAX_US);
+        assert_eq!(consignes.profondeur, IMPULSION_MIN_US);
+        assert_eq!(consignes.direction, IMPULSION_MIN_US);
     }
 
     #[test]

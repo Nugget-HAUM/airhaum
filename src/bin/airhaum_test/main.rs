@@ -230,6 +230,9 @@ async fn main() {
         // `estimation.rx_attitude` existe dès la construction de la tâche
         // d'estimation, pas besoin d'attendre sa première valeur.
         let arret_urgence_console = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // État armé de la mission, publié par la tâche mission (lancée juste
+        // après) et lu par la sûreté : SWA n'a d'effet sur la sécurité qu'armé.
+        let (tx_mission_armee, rx_mission_armee) = tokio::sync::watch::channel(false);
         let surete = airhaum::taches::taches_surete::lancer_surete(
             capteurs.rx_baro.clone(),
             capteurs.rx_telem.clone(),
@@ -237,6 +240,7 @@ async fn main() {
             estimation.rx_navigation.clone(),
             rx_gps_estimation,
             servo.rx_etat.clone(),
+            rx_mission_armee,
             airhaum::surete::limites::LimitesVol::default(),
             std::sync::Arc::clone(&arret_urgence_console),
         );
@@ -265,7 +269,7 @@ async fn main() {
             estimation.rx_navigation.clone(),
             estimation.rx_altitude.clone(),
             controle.tx_phase.clone(), controle.tx_consigne_direction_sol.clone(),
-            controle.tx_consigne_gaz.clone(), controle.tx_arme.clone(),
+            controle.tx_consigne_gaz.clone(), controle.tx_arme.clone(), tx_mission_armee,
             ALTITUDE_CIBLE_M, std::sync::Arc::clone(&commande_operateur_segment),
         );
         let _ = handles_mission.tx_commande.send(CommandeVol::DriversInitialises).await;
@@ -285,7 +289,7 @@ async fn main() {
         let mut sequence_prevol = airhaum::mission::armement::SequencePrevol::nouvelle();
         let mut plan_charge: Option<(String, PlanDeVol)> = None;
         if afficher_checklist_armement(
-            &estimation, gps.as_ref(), &servo, &surete,
+            &estimation, gps.as_ref(), &servo, &controle, &surete,
             &mut sequence_prevol, &mut plan_charge, &handles_mission,
         ).await {
 
@@ -549,7 +553,10 @@ async fn main() {
                     }
                 }
                 "5"  => afficher_etat_arduino(&servo),
-                "51" => tester_debattements_servos(&servo, &mut sequence_prevol),
+                "51" => {
+                    let etat_vol = handles_mission.rx_etat_vol.borrow().clone();
+                    tester_debattements_servos(&servo, &controle, &etat_vol, &mut sequence_prevol);
+                }
                 "52" => campagne_arduino(&servo).await,
                 "6" => {
                     match airhaum::diagnostiques::test_communication_lora() {
@@ -569,7 +576,7 @@ async fn main() {
                 "h" => afficher_altitude(&mut estimation).await,
                 "c" => {
                     if !afficher_checklist_armement(
-                        &estimation, gps.as_ref(), &servo, &surete,
+                        &estimation, gps.as_ref(), &servo, &controle, &surete,
                         &mut sequence_prevol, &mut plan_charge, &handles_mission,
                     ).await {
                         log::info!(target: "systeme", "Session terminée — arrêt opérateur");

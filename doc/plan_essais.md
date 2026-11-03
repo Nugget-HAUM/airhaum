@@ -110,17 +110,26 @@ E1.0, premier essai en conditions réelles de vibration moteur.
 - **Objectif** : vérifier la bascule instantanée entre mode manuel et
   autopilote dans les deux sens, y compris la réaction de sécurité du Pi
   lors d'une reprise manuelle.
-- **Prérequis** : E0.1 validé, réception RC et liaison Pi actives.
+- **Prérequis** : E0.1 validé, réception RC et liaison Pi actives. Armer
+  exige de passer la vérification pré-vol des gouvernes : en l'absence de
+  E0.4, sa première exécution se fait dans cet essai.
 - **Procédure** : basculer l'interrupteur d'arbitrage plusieurs fois, dans
   les deux sens, d'abord gaz au neutre puis avec le système armé en
   autopilote.
 - **Critères de réussite** : bascule instantanée, sans à-coup ni délai
   perceptible ; en mode manuel, restitution fidèle des mouvements RC ; en
-  mode autopilote, prise en compte des consignes Pi ; **une reprise
-  manuelle depuis l'autopilote déclenche l'état `ArretUrgence` côté Pi**
-  (coupure moteur, état atteint visible dans les logs).
+  mode autopilote, prise en compte des consignes Pi ; non armé, aucune
+  bascule ne modifie l'état sécurité ; **une reprise manuelle depuis
+  l'autopilote armé déclenche l'état `ArretUrgence` côté Pi**
+  (`arme = false`, état atteint visible dans les logs), les gaz suivant
+  alors le manche via l'ESP32 ; **un retour en
+  autopilote rend la main à l'autopilote gaz inclus**, après environ 1 s,
+  l'état sécurité restant à `AlerteMineure` (`doc/surete.md`, « Reprise en
+  main par l'opérateur »).
 - **Critères d'arrêt** : bascule qui ne prend pas effet ou effet retardé ;
-  absence de passage en `ArretUrgence` lors de la reprise manuelle.
+  absence de passage en `ArretUrgence` lors de la reprise manuelle ; gaz qui
+  reviennent à l'autopilote sans retour de l'interrupteur en position
+  autopilote.
 - **Vérifications post-essai** : cohérence de l'état de mode remonté par
   l'ESP32 avec la position réelle de l'interrupteur ; état de sécurité
   atteint dans les logs.
@@ -136,12 +145,13 @@ E1.0, premier essai en conditions réelles de vibration moteur.
   observation attentive de cette séquence, avant de lui faire confiance
   comme verrou d'armement pour la suite.
 - **Prérequis** : E0.3 validé.
-- **Procédure** : déclencher la séquence d'armement, observer l'activation
-  unitaire de chaque servo (ailerons, profondeur, direction) telle que
-  pilotée automatiquement, confirmer visuellement sens et débattement.
-- **Critères de réussite** : séquence exécutée sans blocage, sens et
-  débattement conformes pour chaque axe, item "Vérification pré-vol"
-  validé dans la checklist.
+- **Procédure** : SWA en autopilote, système non armé, lancer la vérification
+  (`p` dans la check-liste) et répondre à chaque position demandée : `o`
+  conforme, `n` écart, `q` abandon. Sens attendus : `doc/controle.md`, « Sens
+  des commandes ».
+- **Critères de réussite** : séquence exécutée sans blocage, chaque position
+  tenue et conforme à l'attendu affiché, item "Vérification pré-vol" validé
+  dans la checklist.
 - **Critères d'arrêt** : sens inversé, débattement asymétrique ou
   incomplet, séquence interrompue.
 - **Vérifications post-essai** : néant.

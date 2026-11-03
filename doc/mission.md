@@ -62,7 +62,7 @@ peuvent être acquittés explicitement par l'opérateur.
 | Plan de vol chargé | `mission/plan_vol` | Au moins un segment défini — voir `doc/plan_de_vol.md` |
 | Sûreté nominale | `surete/` | FSM sécurité en état `Normal` |
 | Liaison ESP32 + RC | `hal/uart` | Port série opérationnel, canal RC valide |
-| Vérification pré-vol | `mission/armement` | Séquence d'activation unitaire des servos (débattements nominaux confirmés) |
+| Vérification pré-vol | `mission/armement` | Séquence guidée sur chaque gouverne, SWA en autopilote et système non armé, chaque position confirmée explicitement par l'opérateur |
 
 
 #### Items avertissements (acquittables)
@@ -274,13 +274,15 @@ aucun I/O direct dans ce module-là. Fréquence : 10 Hz, même principe que
 | `altitude_m` | `AltitudeFusionnee.altitude_m` |
 | `hauteur_sol_mm` | `AltitudeFusionnee.hauteur_sol_mm` — **correction de type** : `ContexteVol.hauteur_sol_mm` était `Option<u16>`, incohérent avec `AltitudeFusionnee.hauteur_sol_mm: Option<u32>` ; aligné sur `u32` (`HAUTEUR_FLARE_MM` aussi migrée en `u32`), aucune perte, juste une incohérence de type non détectée jusqu'ici faute de branchement réel. |
 | `altitude_cible_m` | Configuration de mission — reste hors périmètre de cette brique (valeur fixe/`TODO` acceptée pour l'instant, aucun essai courant n'en dépend). |
-| `estimation_prete` | `EtatNavigation.origine_definie` |
+| `estimation_prete` | Première publication de `EtatNavigation` par l'estimation. Ne dépend pas du GPS : celui-ci reste un avertissement acquittable de la check-liste, armer sans fix est possible (pas de vitesse sol, donc pas de transition `CourseDecollage → Montee` ; géofence inactive). |
 
 ### Armement dérivé de l'état vol
 
 `tx_arme` n'est piloté par aucune commande directe : c'est une fonction
 pure de `EtatVol` **et** de `EtatSecurite` (`doit_etre_arme`), republiée
-chaque cycle.
+chaque cycle. La tâche publie aussi `tx_mission_armee` (`EtatVol::est_arme`,
+sans la sécurité), lu par `taches_surete` : voir `doc/surete.md`, « Reprise en
+main par l'opérateur ».
 
 | Plage d'états | `arme` |
 |---------------|--------|
