@@ -111,11 +111,23 @@ impl EtapePrevol {
 #[derive(Debug, Default)]
 pub struct SequencePrevol {
     testees: [bool; NOMBRE_SURFACES],
+    forcee: bool,
 }
 
 impl SequencePrevol {
     pub fn nouvelle() -> Self {
-        Self { testees: [false; NOMBRE_SURFACES] }
+        Self { testees: [false; NOMBRE_SURFACES], forcee: false }
+    }
+
+    /// Passe la vérification sans la dérouler, sur décision de l'opérateur
+    /// (`doc/mission.md`, « Vérification pré-vol forcée »).
+    pub fn forcer(&mut self) {
+        self.forcee = true;
+    }
+
+    /// Vrai si la vérification a été passée sans être déroulée.
+    pub fn forcee(&self) -> bool {
+        self.forcee && !self.testees.iter().all(|&t| t)
     }
 
     /// Marque une surface comme testée cette session.
@@ -123,9 +135,10 @@ impl SequencePrevol {
         self.testees[surface.indice()] = true;
     }
 
-    /// Vrai si les trois surfaces ont été testées cette session.
+    /// Vrai si les trois surfaces ont été testées cette session, ou si
+    /// l'opérateur a forcé la vérification.
     pub fn complete(&self) -> bool {
-        self.testees.iter().all(|&t| t)
+        self.forcee || self.testees.iter().all(|&t| t)
     }
 
     /// Nombre de surfaces déjà testées, pour affichage de progression.
@@ -155,6 +168,29 @@ mod tests {
                 assert_eq!(autres, [IMPULSION_NEUTRE_US; 2]);
             }
         }
+    }
+
+    #[test]
+    fn test_forcer_complete_la_sequence_sans_marquer_les_surfaces() {
+        let mut seq = SequencePrevol::nouvelle();
+        assert!(!seq.forcee());
+
+        seq.forcer();
+
+        assert!(seq.complete());
+        assert!(seq.forcee());
+        assert_eq!(seq.nombre_testees(), 0);
+    }
+
+    #[test]
+    fn test_verification_deroulee_prime_sur_le_forcage() {
+        let mut seq = SequencePrevol::nouvelle();
+        seq.forcer();
+        for surface in SurfaceServo::TOUTES {
+            seq.marquer_testee(surface);
+        }
+        assert!(seq.complete());
+        assert!(!seq.forcee());
     }
 
     #[test]

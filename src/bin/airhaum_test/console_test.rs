@@ -549,13 +549,13 @@ pub async fn campagne_arduino(servo: &HandlesServo) {
 const PERIODE_TEST_GOUVERNES_MS: i32 = 100;
 
 /// Vrai si l'entrée standard a une ligne à lire, en attendant au plus `delai_ms`.
-fn entree_disponible(delai_ms: i32) -> bool {
+pub fn entree_disponible(delai_ms: i32) -> bool {
     let mut descripteur = libc::pollfd { fd: libc::STDIN_FILENO, events: libc::POLLIN, revents: 0 };
     unsafe { libc::poll(&mut descripteur, 1, delai_ms) > 0 }
 }
 
 /// Lit une ligne sur l'entrée standard, en minuscules. Fin de flux → `q`.
-fn lire_reponse() -> String {
+pub fn lire_reponse() -> String {
     let mut reponse = String::new();
     match io::stdin().read_line(&mut reponse) {
         Ok(n) if n > 0 => reponse.trim().to_lowercase(),

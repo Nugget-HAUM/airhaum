@@ -92,12 +92,30 @@ fn attendre_entree() {
     io::stdin().read_line(&mut pause).unwrap();
 }
 
-/// Attend une mise à jour de l'état vol (jusqu'à 500 ms) après l'envoi d'une
-/// commande — la tâche mission ne vide son canal de commandes qu'à son
+/// Attend que l'état vol vérifie `condition` (jusqu'à 500 ms) après l'envoi
+/// d'une commande — la tâche mission ne vide son canal de commandes qu'à son
 /// propre cycle (10 Hz, `doc/mission.md`) : on laisse le temps au prochain
 /// redessin de refléter le nouvel état plutôt que l'ancien.
-async fn attendre_changement_etat(rx: &mut watch::Receiver<EtatVol>) {
-    let _ = tokio::time::timeout(Duration::from_millis(500), rx.changed()).await;
+///
+/// Porte sur la valeur, pas sur `changed()` : la tâche mission republie l'état
+/// à chaque cycle, `changed()` rendrait la main avant le traitement de la commande.
+async fn attendre_etat(rx: &mut watch::Receiver<EtatVol>, condition: impl FnMut(&EtatVol) -> bool) {
+    let _ = tokio::time::timeout(Duration::from_millis(500), rx.wait_for(condition)).await;
+}
+
+/// Écran de mission sur le plan chargé (`console_mission.rs`).
+async fn afficher_mission(
+    plan_charge: &Option<(String, PlanDeVol)>,
+    handles_mission: &HandlesMission,
+    servo: &HandlesServo,
+    surete: &HandlesSurete,
+    commande_operateur_segment: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    if let Some((nom, plan)) = plan_charge.as_ref() {
+        super::console_mission::afficher_ecran_mission(
+            nom, plan, handles_mission, servo, surete, commande_operateur_segment,
+        ).await;
+    }
 }
 
 /// Présente la check-liste d'armement puis, une fois armée, l'écran
@@ -116,6 +134,7 @@ pub async fn afficher_checklist_armement(
     sequence_prevol: &mut SequencePrevol,
     plan_charge: &mut Option<(String, PlanDeVol)>,
     handles_mission: &HandlesMission,
+    commande_operateur_segment: &std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> bool {
     use airhaum::systeme::calibration::{gestionnaire, EtatCalibration, CalibrationPersistante};
     use airhaum::drivers::imu::calibration::{CalibrationGyro, CalibrationAccel, CalibrationMag};
@@ -226,18 +245,21 @@ pub async fn afficher_checklist_armement(
         // Fixup compilation (E0716) : le format! doit être lié à une variable pour
         // survivre jusqu'à l'appel à ligne() — équipe sûreté/armement, à revoir si
         // ce bloc est retouché.
-        let detail_prevol = if prevol_confirme {
+        let prevol_forcee = sequence_prevol.forcee();
+        let detail_prevol = if prevol_forcee {
+            "gouvernes non vérifiées — p. Lancer le test".to_string()
+        } else if prevol_confirme {
             "3/3 surfaces conformes".to_string()
         } else {
             format!(
-                "{}/3 surfaces conformes — p. Lancer le test  ← BLOQUANT",
+                "{}/3 surfaces conformes — p. Lancer le test  fp. Forcer  ← BLOQUANT",
                 sequence_prevol.nombre_testees()
             )
         };
         ligne(
-            if prevol_confirme { "✓" } else { "✗" },
+            if prevol_forcee { "⚠" } else if prevol_confirme { "✓" } else { "✗" },
             "Vérification pré-vol servos",
-            if prevol_confirme { "OK" } else { "KO" },
+            if prevol_forcee { "FORCÉE" } else if prevol_confirme { "OK" } else { "KO" },
             &detail_prevol,
             "",
         );
@@ -325,12 +347,14 @@ pub async fn afficher_checklist_armement(
         let peut_armer = etat_vol == EtatVol::AttenteArmement && bloquants_ok && warnings_ok;
         let peut_lancer = etat_vol == EtatVol::Armement;
         let peut_desarmer = etat_vol == EtatVol::RoulageAuSol;
+        let mission_en_cours = etat_vol.est_arme() && etat_vol != EtatVol::Armement;
 
         println!();
         println!("  Acquitter :  g. GPS    m. Magnétomètre    p. Vérification pré-vol    v. Plan de vol");
         if peut_armer   { println!("  a. Armer"); }
         if peut_lancer  { println!("  l. Lancer la mission"); }
         if peut_desarmer { println!("  d. Désarmer"); }
+        if mission_en_cours { println!("  e. Écran de mission"); }
         println!("  j. Journal    [Entrée] Continuer vers le menu    q. Quitter le programme");
         print!("\n  Votre choix : ");
         io::stdout().flush().unwrap();
@@ -346,26 +370,54 @@ pub async fn afficher_checklist_armement(
                 super::console_test::tester_debattements_servos(servo, controle, &etat_vol, sequence_prevol);
                 attendre_entree();
             }
+            "fp" | "FP" if !prevol_confirme => {
+                sequence_prevol.forcer();
+                log::warn!(target: "mission", "Vérification pré-vol des gouvernes forcée par l'opérateur");
+            }
             "v" | "V" => selectionner_plan_de_vol(plan_charge, &handles_mission.tx_plan),
             "a" | "A" if peut_armer => {
                 let _ = handles_mission.tx_commande.send(CommandeVol::Armer).await;
-                attendre_changement_etat(&mut rx_etat_vol).await;
+                attendre_etat(&mut rx_etat_vol, |e| *e != etat_vol).await;
             }
             "l" | "L" if peut_lancer => {
                 let _ = handles_mission.tx_commande.send(CommandeVol::ArmementValide).await;
-                attendre_changement_etat(&mut rx_etat_vol).await;
+                attendre_etat(&mut rx_etat_vol, |e| *e != etat_vol).await;
+                if *rx_etat_vol.borrow() != EtatVol::Armement {
+                    afficher_mission(plan_charge, handles_mission, servo, surete, commande_operateur_segment).await;
+                }
+            }
+            "e" | "E" if mission_en_cours => {
+                afficher_mission(plan_charge, handles_mission, servo, surete, commande_operateur_segment).await;
             }
             "d" | "D" if peut_desarmer => {
                 let _ = handles_mission.tx_commande.send(CommandeVol::Desarmer).await;
-                attendre_changement_etat(&mut rx_etat_vol).await;
-                // Pas de confirmation actionneurs réelle aujourd'hui (v1,
-                // aucun module ne l'émet) — enchaînée directement, voir
-                // doc/mission.md, « Désarmement ».
-                let _ = handles_mission.tx_commande.send(CommandeVol::ActionneursDesarmes).await;
-                attendre_changement_etat(&mut rx_etat_vol).await;
+                // `SauvegardeDonnees` est enchaîné par la tâche mission
+                // (doc/mission.md, « Désarmement »).
+                attendre_etat(&mut rx_etat_vol, |e| *e == EtatVol::SauvegardeDonnees).await;
             }
             "j" | "J" => super::console_test::afficher_journal(20),
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn attendre_etat_ignore_la_republication_de_la_meme_valeur() {
+        let (tx, mut rx) = watch::channel(EtatVol::Armement);
+        // Republications à 10 Hz pendant que la console attend une saisie.
+        tx.send(EtatVol::Armement).unwrap();
+
+        let tx_mission = tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            tx_mission.send(EtatVol::RoulageAuSol).unwrap();
+        });
+
+        attendre_etat(&mut rx, |e| *e != EtatVol::Armement).await;
+        assert_eq!(*rx.borrow(), EtatVol::RoulageAuSol);
     }
 }

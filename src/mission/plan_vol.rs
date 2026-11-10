@@ -13,6 +13,7 @@
 //! (`attente`, `roulage_cap`) — voir `doc/plan_de_vol.md` pour les
 //! décisions actées/différées (conditions combinées, actions annexes...).
 
+use std::fmt;
 use std::fs;
 use std::path::Path;
 
@@ -80,6 +81,18 @@ impl TypeSegment {
     }
 }
 
+/// Libellé court pour l'écran de mission, ex. « roulage cap 0°, gaz 10 % ».
+impl fmt::Display for TypeSegment {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TypeSegment::Attente => write!(f, "attente"),
+            TypeSegment::RoulageCap { cap_deg, gaz } => {
+                write!(f, "roulage cap {:.0}°, gaz {:.0} %", cap_deg, gaz * 100.0)
+            }
+        }
+    }
+}
+
 /// Origine d'une commande opérateur explicite (voir `doc/plan_de_vol.md`,
 /// reprend le pattern à trois origines déjà utilisé pour `Desarmer`). Seule
 /// `Console` est câblée dans cette itération.
@@ -116,6 +129,16 @@ pub struct Segment {
     #[serde(flatten)]
     pub type_segment: TypeSegment,
     pub fin: ConditionFin,
+}
+
+impl Segment {
+    /// Durée fixe du segment, `None` s'il attend une commande opérateur.
+    pub fn duree_s(&self) -> Option<f32> {
+        match self.fin {
+            ConditionFin::Duree { secs } => Some(secs),
+            ConditionFin::CommandeOperateur { .. } => None,
+        }
+    }
 }
 
 /// Événements externes pertinents pour l'évaluation d'une condition de fin,
@@ -194,6 +217,11 @@ impl PlanDeVol {
         if !self.est_termine() {
             self.index_courant += 1;
         }
+    }
+
+    /// Tous les segments, dans l'ordre — pour l'écran de mission.
+    pub fn segments(&self) -> &[Segment] {
+        &self.segments
     }
 
     /// Nombre total de segments du plan.
@@ -366,6 +394,22 @@ fin = { commande_operateur = "console" }
     }
 
     // ── Consignes produites ──────────────────────────────────────────────
+
+    #[test]
+    fn libelle_et_duree_des_segments() {
+        let plan = PlanDeVol::depuis_toml(EXEMPLE_TOML).unwrap();
+        let [attente, roulage] = plan.segments() else { panic!("deux segments attendus") };
+        assert_eq!(attente.type_segment.to_string(), "attente");
+        assert_eq!(roulage.type_segment.to_string(), "roulage cap 0°, gaz 20 %");
+        assert_eq!(roulage.duree_s(), Some(20.0));
+
+        let plan = PlanDeVol::depuis_toml(r#"
+[[segment]]
+type = "attente"
+fin = { commande_operateur = "console" }
+"#).unwrap();
+        assert_eq!(plan.segments()[0].duree_s(), None);
+    }
 
     #[test]
     fn consigne_attente_gaz_nul_et_pas_de_direction() {

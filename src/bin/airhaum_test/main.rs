@@ -20,6 +20,7 @@
 
 mod console_calibration;
 mod console_armement;
+mod console_mission;
 mod console_test;
 
 use std::io::{self, Write};
@@ -272,6 +273,16 @@ async fn main() {
             controle.tx_consigne_gaz.clone(), controle.tx_arme.clone(), tx_mission_armee,
             ALTITUDE_CIBLE_M, std::sync::Arc::clone(&commande_operateur_segment),
         );
+        // Boîte noire : données de vol, légères avant l'armement, complètes ensuite.
+        let enregistrement = airhaum::taches::taches_enregistrement::lancer_enregistrement(
+            handles_mission.rx_etat_vol.clone(),
+            surete.rx_securite.clone(),
+            servo.rx_etat.clone(),
+            servo.tx_consignes.subscribe(),
+            estimation.rx_navigation.clone(),
+            estimation.rx_altitude.clone(),
+        );
+
         let _ = handles_mission.tx_commande.send(CommandeVol::DriversInitialises).await;
         let _ = handles_mission.tx_commande.send(CommandeVol::ConfigurationTerminee).await;
 
@@ -290,7 +301,7 @@ async fn main() {
         let mut plan_charge: Option<(String, PlanDeVol)> = None;
         if afficher_checklist_armement(
             &estimation, gps.as_ref(), &servo, &controle, &surete,
-            &mut sequence_prevol, &mut plan_charge, &handles_mission,
+            &mut sequence_prevol, &mut plan_charge, &handles_mission, &commande_operateur_segment,
         ).await {
 
         // ── Menu de test ──────────────────────────────────────────────────────
@@ -577,7 +588,7 @@ async fn main() {
                 "c" => {
                     if !afficher_checklist_armement(
                         &estimation, gps.as_ref(), &servo, &controle, &surete,
-                        &mut sequence_prevol, &mut plan_charge, &handles_mission,
+                        &mut sequence_prevol, &mut plan_charge, &handles_mission, &commande_operateur_segment,
                     ).await {
                         log::info!(target: "systeme", "Session terminée — arrêt opérateur");
                         println!("\nAu revoir !");
@@ -629,6 +640,7 @@ async fn main() {
             println!("\nAu revoir !");
         }
 
+        enregistrement.arreter();
         handles_mission.arreter();
         controle.arreter();
         estimation.arreter();

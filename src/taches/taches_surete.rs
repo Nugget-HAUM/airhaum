@@ -134,6 +134,12 @@ pub fn lancer_surete(
 // Corps de la tâche
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// État et raison sans leurs valeurs numériques : « aucune donnée depuis 15,9 s »
+/// ou « 6 erreurs consécutives » restent une seule et même situation.
+fn situation_a_journaliser(etat: &EtatSecurite) -> String {
+    etat.to_string().chars().filter(|c| !c.is_ascii_digit()).collect()
+}
+
 async fn tache_surete(
     mut rx_baro: watch::Receiver<MesureBaro>,
     mut rx_telem: watch::Receiver<MesureTelem>,
@@ -160,6 +166,7 @@ async fn tache_surete(
     // d'arrêt d'urgence — seul un *retour* au manuel après un passage en
     // autopilote armé signale une vraie reprise en main.
     let mut autopilote_arme_engage = false;
+    let mut derniere_situation = situation_a_journaliser(&EtatSecurite::Normal);
 
     let mut tick = interval(Duration::from_millis(PERIODE_MS));
 
@@ -231,10 +238,18 @@ async fn tache_surete(
 
         let etat = mae.actualiser(&entrees).clone();
 
-        if etat.est_critique() {
-            log::error!(target: "surete", "État sécurité : {}", etat);
-        } else if !matches!(etat, EtatSecurite::Normal) {
-            log::warn!(target: "surete", "État sécurité : {}", etat);
+        // Une ligne par changement : l'état complet est enregistré à 10 Hz en
+        // mission (`taches_enregistrement`).
+        let situation = situation_a_journaliser(&etat);
+        if situation != derniere_situation {
+            if etat.est_critique() {
+                log::error!(target: "surete", "État sécurité : {}", etat);
+            } else if matches!(etat, EtatSecurite::Normal) {
+                log::info!(target: "surete", "État sécurité : {}", etat);
+            } else {
+                log::warn!(target: "surete", "État sécurité : {}", etat);
+            }
+            derniere_situation = situation;
         }
 
         let _ = tx_securite.send(etat);
@@ -284,6 +299,23 @@ mod tests {
         );
 
         (tx_arduino, tx_mission_armee, handles)
+    }
+
+    #[test]
+    fn situation_ignore_les_valeurs_mais_pas_la_cause() {
+        let mineure = |raison: &str| EtatSecurite::AlerteMineure { raison: raison.into() };
+        assert_eq!(
+            situation_a_journaliser(&mineure("telem : 5 erreurs consécutives")),
+            situation_a_journaliser(&mineure("telem : 12 erreurs consécutives")),
+        );
+        assert_ne!(
+            situation_a_journaliser(&mineure("telem : 5 erreurs consécutives")),
+            situation_a_journaliser(&mineure("gps : 5 erreurs consécutives")),
+        );
+        assert_ne!(
+            situation_a_journaliser(&mineure("gps")),
+            situation_a_journaliser(&EtatSecurite::AlerteMajeure { raison: "gps".into() }),
+        );
     }
 
     #[tokio::test]

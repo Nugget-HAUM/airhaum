@@ -44,12 +44,19 @@ struct EntreeJournal {
     msg:    String,
 }
 
+enum MessageJournal {
+    Entree(EntreeJournal),
+    /// Pousse les fichiers sur disque (`log::logger().flush()`).
+    Vider,
+    Arret,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Moteur — implémente log::Log
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct MoteurJournalisation {
-    emetteur: SyncSender<Option<EntreeJournal>>,
+    emetteur: SyncSender<MessageJournal>,
 }
 
 impl Log for MoteurJournalisation {
@@ -68,10 +75,14 @@ impl Log for MoteurJournalisation {
             msg:    record.args().to_string(),
         };
         // Non-bloquant : entrée silencieusement abandonnée si le canal est plein
-        let _ = self.emetteur.try_send(Some(entree));
+        let _ = self.emetteur.try_send(MessageJournal::Entree(entree));
     }
 
-    fn flush(&self) {}
+    /// Bloquant si le canal est plein : réservé aux points de clôture
+    /// (`SauvegardeDonnees`), jamais au chemin des mesures.
+    fn flush(&self) {
+        let _ = self.emetteur.send(MessageJournal::Vider);
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -79,7 +90,7 @@ impl Log for MoteurJournalisation {
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn thread_ecrivain(
-    rx:          mpsc::Receiver<Option<EntreeJournal>>,
+    rx:          mpsc::Receiver<MessageJournal>,
     mut boite_noire: File,
     mut fil_de_vie:  File,
 ) {
@@ -87,13 +98,20 @@ fn thread_ecrivain(
 
     loop {
         match rx.recv() {
-            Ok(Some(e)) => {
+            Ok(MessageJournal::Entree(e)) => {
                 ecrire_boite_noire(&mut boite_noire, &e);
                 ecrire_fil_de_vie(&mut fil_de_vie, &e, &mut derniere_nav);
             }
-            Ok(None) | Err(_) => break,
+            Ok(MessageJournal::Vider) => {
+                let _ = boite_noire.sync_data();
+                let _ = fil_de_vie.sync_data();
+            }
+            Ok(MessageJournal::Arret) | Err(_) => break,
         }
     }
+
+    let _ = boite_noire.sync_data();
+    let _ = fil_de_vie.sync_data();
 }
 
 fn ecrire_boite_noire(f: &mut File, e: &EntreeJournal) {
@@ -170,13 +188,13 @@ fn echapper_json(s: &str) -> String {
 /// `main` ou `drop` explicite), il envoie le signal d'arrêt au thread et attend
 /// que les tampons soient vidés sur disque avant de rendre la main.
 pub struct JournalisationHandle {
-    arret:  SyncSender<Option<EntreeJournal>>,
+    arret:  SyncSender<MessageJournal>,
     thread: Option<thread::JoinHandle<()>>,
 }
 
 impl Drop for JournalisationHandle {
     fn drop(&mut self) {
-        let _ = self.arret.send(None);
+        let _ = self.arret.send(MessageJournal::Arret);
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
@@ -214,7 +232,7 @@ pub fn initialiser() -> Result<JournalisationHandle, Box<dyn std::error::Error>>
     let gestionnaire_precedent = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         log::error!(target: "systeme", "Arrêt inattendu : {}", info);
-        let _ = tx_panique.try_send(None);
+        let _ = tx_panique.try_send(MessageJournal::Arret);
         thread::sleep(Duration::from_millis(100));
         gestionnaire_precedent(info);
     }));

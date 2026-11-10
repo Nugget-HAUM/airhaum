@@ -31,7 +31,8 @@
 //! 7. Exécution du plan de vol si l'état courant est `RoulageAuSol` ou
 //!    `CourseDecollage` ; sinon, le plan peut encore être chargé ou changé
 //!    (`tx_plan`, voir `HandlesMission`) — voir `doc/mission.md`,
-//!    « Injection du plan de vol ».
+//!    « Injection du plan de vol ». Plan terminé : gaz à zéro et désarmement
+//!    automatique, jusqu'à `SauvegardeDonnees` et le vidage de la boîte noire.
 
 use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
 use std::time::Instant;
@@ -67,10 +68,26 @@ pub struct HandlesMission {
     /// Dépôt du plan de vol chargé par la console (`v` dans la check-liste
     /// d'armement) — voir la documentation de [`lancer_mission`].
     pub tx_plan: watch::Sender<Option<PlanDeVol>>,
+    /// Avancement du plan de vol, `None` avant le lancement de la mission —
+    /// pour l'écran de mission de la console.
+    pub rx_progression: watch::Receiver<Option<ProgressionPlan>>,
     /// Tâche Tokio — annulable via `arreter()`.
     tache: tokio::task::JoinHandle<()>,
     /// Signal d'arrêt partagé avec la tâche.
     arret: Arc<AtomicBool>,
+}
+
+/// Avancement du plan de vol, publié à chaque cycle d'exécution et conservé
+/// ensuite (la dernière valeur donne la durée de la mission terminée).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ProgressionPlan {
+    /// Index (0-based) du segment en cours, égal au nombre de segments une
+    /// fois le plan terminé.
+    pub segment: usize,
+    /// Temps écoulé dans le segment en cours.
+    pub ecoule_segment_s: f32,
+    /// Temps écoulé depuis le lancement de la mission (`RoulageAuSol`).
+    pub ecoule_mission_s: f32,
 }
 
 impl HandlesMission {
@@ -126,18 +143,19 @@ pub fn lancer_mission(
     let (tx_etat_vol, rx_etat_vol) = watch::channel(EtatVol::default());
     let (tx_commande, rx_commande) = mpsc::channel(CAPACITE_COMMANDES);
     let (tx_plan, rx_plan) = watch::channel(None);
+    let (tx_progression, rx_progression) = watch::channel(None);
 
     let arret_tache = Arc::clone(&arret);
     let tache = tokio::spawn(async move {
         tache_mission(
             rx_securite, rx_navigation, rx_altitude, rx_commande, rx_plan,
             tx_etat_vol, tx_phase, tx_consigne_direction_sol, tx_consigne_gaz, tx_arme,
-            tx_mission_armee, altitude_cible_m, commande_operateur_segment,
+            tx_mission_armee, tx_progression, altitude_cible_m, commande_operateur_segment,
             arret_tache,
         ).await;
     });
 
-    HandlesMission { rx_etat_vol, tx_commande, tx_plan, tache, arret }
+    HandlesMission { rx_etat_vol, tx_commande, tx_plan, rx_progression, tache, arret }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -181,6 +199,7 @@ async fn tache_mission(
     tx_consigne_gaz: watch::Sender<ConsigneGaz>,
     tx_arme: watch::Sender<bool>,
     tx_mission_armee: watch::Sender<bool>,
+    tx_progression: watch::Sender<Option<ProgressionPlan>>,
     altitude_cible_m: f32,
     commande_operateur_segment: Arc<AtomicBool>,
     arret: Arc<AtomicBool>,
@@ -188,12 +207,14 @@ async fn tache_mission(
     let mut mae = MachineEtatVol::nouveau();
     let mut plan: Option<PlanDeVol> = None;
     let mut debut_segment = Instant::now();
+    let mut debut_mission = Instant::now();
     // Vrai dès que le plan de vol a commencé à s'exécuter (voir plus bas) —
     // sert à détecter le passage à `true` d'`execute_plan_de_vol` pour
     // réinitialiser `debut_segment` à cet instant précis, plutôt qu'au
     // démarrage de la tâche (qui peut précéder l'armement de plusieurs
     // minutes, le temps que l'opérateur déroule la check-liste).
     let mut execution_en_cours = false;
+    let mut fin_de_plan_signalee = false;
     let mut tick = interval(Duration::from_millis(PERIODE_MS));
 
     loop {
@@ -236,6 +257,12 @@ async fn tache_mission(
         // 4. Diffusion de l'état vol.
         let _ = tx_etat_vol.send(etat.clone());
 
+        // Pas de confirmation actionneurs réelle en v1 (doc/mission.md,
+        // « Désarmement ») : enchaînée une fois `Desarmement` publié.
+        if etat == EtatVol::Desarmement {
+            mae.traiter_commande(CommandeVol::ActionneursDesarmes);
+        }
+
         // 5. Phase contrôle — Vol si en vol, Sol sinon (doc/controle.md).
         let phase = if etat.est_en_vol() { PhaseControle::Vol } else { PhaseControle::Sol };
         let _ = tx_phase.send(phase);
@@ -250,6 +277,7 @@ async fn tache_mission(
             // Premier cycle d'exécution : le chronomètre du segment démarre
             // ici, pas au lancement de la tâche (voir `execution_en_cours`).
             debut_segment = Instant::now();
+            debut_mission = debut_segment;
         }
         execution_en_cours = executer;
 
@@ -275,6 +303,28 @@ async fn tache_mission(
                         debut_segment = Instant::now();
                     }
                 }
+
+                // Mission finie : gaz coupés sans attendre le cycle suivant, qui
+                // retire l'armement. `Desarmer` n'est pas valide en
+                // `CourseDecollage` : les gaz y restent coupés, sans désarmement.
+                if plan_actif.est_termine() {
+                    let _ = tx_consigne_gaz.send(ConsigneGaz::default());
+                    let desarmement = mae.traiter_commande(CommandeVol::Desarmer).is_some();
+                    if !fin_de_plan_signalee {
+                        fin_de_plan_signalee = true;
+                        if desarmement {
+                            log::info!(target: "mission", "Plan de vol terminé : gaz coupés, désarmement");
+                        } else {
+                            log::warn!(target: "mission", "Plan de vol terminé en {} : gaz coupés, désarmement impossible", etat);
+                        }
+                    }
+                }
+
+                let _ = tx_progression.send(Some(ProgressionPlan {
+                    segment: plan_actif.index_courant(),
+                    ecoule_segment_s: debut_segment.elapsed().as_secs_f32(),
+                    ecoule_mission_s: debut_mission.elapsed().as_secs_f32(),
+                }));
             }
         } else if let Some(nouveau) = rx_plan.borrow_and_update().clone() {
             // Pas encore en exécution : le plan peut encore être chargé ou
@@ -376,6 +426,91 @@ fin = { commande_operateur = "console" }
         b.handles.tx_commande.send(CommandeVol::Armer).await.unwrap();
         b.handles.tx_commande.send(CommandeVol::ArmementValide).await.unwrap();
         tokio::time::sleep(Duration::from_millis(120)).await;
+    }
+
+    #[tokio::test]
+    async fn fin_de_plan_coupe_les_gaz_et_desarme_jusqu_a_la_sauvegarde() {
+        let plan = PlanDeVol::depuis_toml(r#"
+[[segment]]
+type = "roulage_cap"
+cap_deg = 0.0
+gaz = 0.3
+fin = { duree_s = 0.4 }
+"#).unwrap();
+        let b = lancer_test(plan);
+        amener_a_roulage_au_sol(&b).await;
+
+        assert_eq!(*b.handles.rx_etat_vol.borrow(), EtatVol::RoulageAuSol);
+        assert_eq!(b.rx_consigne_gaz.borrow().gaz, 0.3);
+        assert!(*b.rx_arme.borrow());
+
+        // `Desarmement` doit être réellement publié, pas seulement traversé.
+        // L'état est republié à chaque cycle : relevé borné dans le temps, sans
+        // les répétitions.
+        let mut rx_etat = b.handles.rx_etat_vol.clone();
+        let mut publies = Vec::new();
+        let echeance = tokio::time::Instant::now() + Duration::from_millis(700);
+        while let Ok(Ok(())) = tokio::time::timeout_at(echeance, rx_etat.changed()).await {
+            let etat = rx_etat.borrow_and_update().clone();
+            if publies.last() != Some(&etat) {
+                publies.push(etat);
+            }
+        }
+        assert_eq!(publies, vec![
+            EtatVol::RoulageAuSol, EtatVol::Desarmement, EtatVol::SauvegardeDonnees,
+        ]);
+        assert_eq!(b.rx_consigne_gaz.borrow().gaz, 0.0);
+        assert!(!*b.rx_arme.borrow());
+        assert!(!*b.rx_mission_armee.borrow());
+
+        b.handles.arreter();
+    }
+
+    #[tokio::test]
+    async fn progression_publiee_du_lancement_a_la_fin_du_plan() {
+        let plan = PlanDeVol::depuis_toml(r#"
+[[segment]]
+type = "attente"
+fin = { duree_s = 0.3 }
+
+[[segment]]
+type = "attente"
+fin = { duree_s = 0.3 }
+"#).unwrap();
+        let b = lancer_test(plan);
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(*b.handles.rx_progression.borrow(), None);
+
+        amener_a_roulage_au_sol(&b).await;
+        let p = b.handles.rx_progression.borrow().unwrap();
+        assert_eq!(p.segment, 0);
+        assert!(p.ecoule_mission_s < 0.3);
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(b.handles.rx_progression.borrow().unwrap().segment, 1);
+
+        // Fin au cycle qui suit l'échéance, puis un cycle par état : pas de
+        // délai fixe, sensible au cadencement.
+        let mut rx_etat = b.handles.rx_etat_vol.clone();
+        tokio::time::timeout(Duration::from_secs(2), rx_etat.wait_for(|e| *e == EtatVol::SauvegardeDonnees))
+            .await.expect("fin de mission non atteinte").unwrap();
+        let fin = b.handles.rx_progression.borrow().unwrap();
+        assert_eq!(fin.segment, 2);
+        assert!((0.55..1.0).contains(&fin.ecoule_mission_s), "{}", fin.ecoule_mission_s);
+
+        b.handles.arreter();
+    }
+
+    #[tokio::test]
+    async fn desarmer_mene_a_la_sauvegarde_sans_autre_commande() {
+        let b = lancer_test(plan_deux_segments());
+        amener_a_roulage_au_sol(&b).await;
+
+        b.handles.tx_commande.send(CommandeVol::Desarmer).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(350)).await;
+
+        assert_eq!(*b.handles.rx_etat_vol.borrow(), EtatVol::SauvegardeDonnees);
+        b.handles.arreter();
     }
 
     #[tokio::test]

@@ -73,6 +73,17 @@ D'autres feuilles (seuil de vitesse, distance parcourue) viendront
 naturellement avec les essais qui en ont besoin (E2+) — non anticipées ici
 pour rester au plus près du besoin actuel.
 
+La fin du dernier segment termine la mission : gaz coupés et désarmement
+automatique (`doc/mission.md`, « Fin de mission automatique »).
+
+---
+
+## Référence du cap
+
+Le cap `cap_deg` d'un `roulage_cap` n'est pas géographique : l'estimation
+n'utilise pas le magnétomètre, le cap vaut 0° sur le nez de l'avion au
+lancement du programme, puis dérive avec le gyroscope. À reprendre avant E1.
+
 ---
 
 ## Source de commande

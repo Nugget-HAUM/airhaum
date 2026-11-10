@@ -114,8 +114,9 @@ E1.0, premier essai en conditions réelles de vibration moteur.
   exige de passer la vérification pré-vol des gouvernes : en l'absence de
   E0.4, sa première exécution se fait dans cet essai.
 - **Procédure** : basculer l'interrupteur d'arbitrage plusieurs fois, dans
-  les deux sens, d'abord gaz au neutre puis avec le système armé en
-  autopilote.
+  les deux sens, d'abord non armé, puis pendant une mission statique à bas
+  régime, hélice démontée : gaz nuls, gaz à 10 %, gaz nuls, fin de mission
+  automatique. Aucune action console après le lancement.
 - **Critères de réussite** : bascule instantanée, sans à-coup ni délai
   perceptible ; en mode manuel, restitution fidèle des mouvements RC ; en
   mode autopilote, prise en compte des consignes Pi ; non armé, aucune

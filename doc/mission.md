@@ -62,7 +62,7 @@ peuvent être acquittés explicitement par l'opérateur.
 | Plan de vol chargé | `mission/plan_vol` | Au moins un segment défini — voir `doc/plan_de_vol.md` |
 | Sûreté nominale | `surete/` | FSM sécurité en état `Normal` |
 | Liaison ESP32 + RC | `hal/uart` | Port série opérationnel, canal RC valide |
-| Vérification pré-vol | `mission/armement` | Séquence guidée sur chaque gouverne, SWA en autopilote et système non armé, chaque position confirmée explicitement par l'opérateur |
+| Vérification pré-vol | `mission/armement` | Séquence guidée sur chaque gouverne, SWA en autopilote et système non armé, chaque position confirmée explicitement par l'opérateur. Peut être forcée par la touche `fp` : voir ci-dessous |
 
 
 #### Items avertissements (acquittables)
@@ -76,6 +76,15 @@ Le GPS est acquittable pour permettre les vols de test en
 mode attitude sans navigation autonome. La calibration magnétomètre est
 acquittable car le lacet est estimé par gyro seul en l'absence de magnétomètre
 fiable ; le dérapage accumulé reste acceptable pour la phase de test.
+
+#### Vérification pré-vol forcée
+
+La touche `fp` passe la vérification pré-vol sans la dérouler, sur décision de
+l'opérateur : utile en phase d'essais, quand elle vient d'être faite plusieurs
+fois et que rien n'a changé. L'item s'affiche `⚠ FORCÉE` et l'action est
+journalisée en `WARN` (cible `mission`), donc tracée dans la boîte noire. Le
+forçage ne vaut que pour la session. Rejouer le test (`p`) l'annule : seul le
+dernier passage fait foi.
 
 
 #### Implémentation
@@ -117,14 +126,64 @@ relu à chaque rafraîchissement de l'écran) :
 | Touche | Commande envoyée | Condition d'affichage |
 |--------|-------------------|------------------------|
 | `a` — Armer | `CommandeVol::Armer` | `AttenteArmement`, tous les bloquants au vert et avertissements acquittés |
-| `l` — Lancer la mission | `CommandeVol::ArmementValide` | `Armement` |
-| `d` — Désarmer | `CommandeVol::Desarmer` puis `CommandeVol::ActionneursDesarmes` | `RoulageAuSol` (seul état où `Desarmer` est une transition valide, voir `etat_machine.rs`) |
+| `l` — Lancer la mission | `CommandeVol::ArmementValide`, puis écran de mission | `Armement` |
+| `d` — Désarmer | `CommandeVol::Desarmer` | `RoulageAuSol` (seul état où `Desarmer` est une transition valide, voir `etat_machine.rs`) |
+| `e` — Écran de mission | — | Mission en cours (armé, au-delà d'`Armement`) |
+
+#### Écran de mission (`console_mission.rs`)
+
+Affiché dès que `l` a lancé la mission, rafraîchi chaque seconde sans action
+de l'opérateur :
+
+```
+  MISSION EN COURS — RoulageAuSol           écoulé 00:27 / 01:30
+  Plan : e0.3_mission_statique.toml
+
+  ✓ 1. attente                          20 s
+  ▶ 2. roulage cap 0°, gaz 10 %         60 s                 reste 00:53
+    3. attente                          10 s
+    Fin : désarmement automatique                            dans 01:03
+
+  Mode : Autopilote   Armé : oui
+
+  Servos (µs)         Ailerons  Profondeur    Gaz  Direction
+  Envoyé (Pi)             1500        1500   1100       1500
+  Reçu (RC)               1402        1498   1003       1500
+  Appliqué (ESP32)           —           —   1100          —
+
+  Sécurité : Normal
+```
+
+- **Servos** : consignes envoyées par le Pi, canaux RC reçus par l'ESP32, gaz
+  appliqué. La remontée de l'ESP32 (`doc/interface_pi_rc_servos.md`) ne donne
+  pas la position appliquée aux gouvernes : elle est affichée « — » plutôt que
+  déduite du mode.
+
+- **Chronomètre** : publié par la tâche mission (`HandlesMission::rx_progression`,
+  `ProgressionPlan`), il part du lancement (`RoulageAuSol`) et continue pendant
+  une reprise en main manuelle, comme le plan. Durée totale et échéance de fin
+  affichées `--:--` ou absentes si un segment attend une commande opérateur.
+- **Touches** : `d` désarmer (fin de mission anticipée, en `RoulageAuSol`),
+  `s` segment suivant (segment `fin = { commande_operateur = "console" }`, seul
+  moyen de le terminer), `q` retour à la check-liste, la mission continuant ;
+  `e` y ramène.
+- **Fin de mission** : l'écran passe seul à « MISSION TERMINÉE », avec le
+  déroulé et la durée, puis Entrée termine le programme.
 
 `ActionneursDesarmes` est documentée comme émise par un module système une
 fois les actionneurs confirmés désactivés — ce module n'existe pas encore
-en v1, donc la console l'envoie directement à la suite de `Desarmer`
-(simplification acceptée, à revoir si une vraie confirmation actionneurs
-est implémentée).
+en v1, donc la tâche mission l'enchaîne un cycle après l'entrée en
+`Desarmement` (simplification acceptée, à revoir si une vraie confirmation
+actionneurs est implémentée).
+
+**Fin de mission automatique.** Une fois le dernier segment du plan terminé,
+la tâche mission coupe les gaz et désarme d'elle-même, sans commande console :
+`RoulageAuSol → Desarmement → SauvegardeDonnees`, puis vidage de la boîte noire
+par l'enregistreur (`doc/journalisation.md`). Laisser les gaz tourner une mission
+finie serait dangereux. Depuis `CourseDecollage`, où `Desarmer` n'est pas valide,
+les gaz sont coupés sans désarmement (état inatteignable avec les plans actuels,
+segments de sol uniquement). La console n'est plus nécessaire après le lancement ; le prochain
+retour à la check-liste affiche le message de fin.
 
 Une fois `SauvegardeDonnées` atteint, la check-liste affiche un message de
 fin et **met fin au programme** — décision actée : un lancement de
@@ -334,9 +393,9 @@ mission »*) :
   explicite via la console en v1, corrigé en conséquence. C'est cette
   transition qui amène l'état courant à `RoulageAuSol`, la condition dont
   dépend l'exécution du plan de vol (étape 7 ci-dessus).
-- **Désarmer** (`CommandeVol::Desarmer`, suivie immédiatement de
-  `CommandeVol::ActionneursDesarmes`) : voir « Actions armer/lancer/
-  désarmer » ci-dessus pour le détail et la justification du chaînage.
+- **Désarmer** (`CommandeVol::Desarmer`, `ActionneursDesarmes` étant enchaînée
+  par la tâche mission) : voir « Actions armer/lancer/désarmer » ci-dessus pour
+  le détail et la justification du chaînage.
 
 Ces trois actions sont déclenchées depuis la check-liste d'armement
 (`console_armement.rs`), pas depuis le menu de test.

@@ -7,6 +7,7 @@
 
 pub mod taches_capteurs;
 pub mod taches_controle;
+pub mod taches_enregistrement;
 pub mod taches_estimation;
 pub mod taches_gps;
 pub mod taches_mission;

@@ -44,11 +44,11 @@ threads capteurs / estimation / mission / sûreté
 
 ### Vidage
 
-Le vidage explicite n'est déclenché que par le **gestionnaire de panique** : un gestionnaire Rust installé
-au démarrage force le vidage des tampons avant de terminer le processus.
-Cela garantit que les derniers enregistrements sont sur disque en cas de crash
-logiciel. Une coupure d'alimentation peut entraîner la perte des dernières
-secondes — compromis accepté.
+Les fichiers sont poussés sur disque à l'entrée dans `SauvegardeDonnees`
+(`log::logger().flush()`) et à l'arrêt du programme. En cas de panique, un
+gestionnaire Rust installé au démarrage arrête proprement le thread écrivain
+avant de terminer le processus. Une coupure d'alimentation peut entraîner la
+perte des dernières secondes — compromis accepté.
 
 ---
 
@@ -67,12 +67,14 @@ n'existant pas hors de la cible embarquée).
 
 ```json
 {"ts":"2026-04-22T10:15:32.456","lvl":"INFO","cible":"mission","msg":"AttenteArmement → Armement"}
-{"ts":"2026-04-22T10:15:33.100","lvl":"INFO","cible":"nav","r":-0.3,"t":1.2,"l":45.6,"pN":0.0,"pE":0.0,"pB":0.0,"vN":12.3,"vE":0.1,"vB":-0.2,"alt":150.3}
+{"ts":"2026-04-22T10:15:33.100","lvl":"INFO","cible":"nav","msg":"etat=RoulageAuSol mode=Autopilote arme=true rc_perdu=false chien_de_garde=false gaz_applique=1100 ch1=1500 ch2=1500 ch3=1000 ch4=1500 ch5=2000 c_ail=1500 c_pro=1500 c_gaz=1100 c_dir=1500 roulis=0.10 tangage=10.80 lacet=0.20 pos_n=0.00 pos_e=0.00 pos_b=0.00 vit_n=0.00 vit_e=0.00 vit_b=0.00 origine=false alt_m=0.12 sol_mm=- securite=\"Normal\""}
 {"ts":"2026-04-22T10:15:34.891","lvl":"WARN","cible":"gps","msg":"Fix perdu — 4 sats < seuil 6"}
 ```
 
-Les enregistrements de navigation utilisent des champs structurés (pas un champ `msg`)
-pour faciliter l'import dans des outils d'analyse (pandas, gnuplot).
+Les échantillons de vol (`taches/taches_enregistrement.rs`) sont une suite de
+`clé=valeur` dans `msg`, `-` pour une valeur absente, l'état sécurité en dernier :
+`ch1` à `ch5` sont les canaux RC (`ch5` = SWA), `c_*` les consignes du Pi vers
+les servos, `gaz_applique` la remontée de l'ESP32.
 
 
 ### Contenu et fréquences
@@ -81,10 +83,9 @@ pour faciliter l'import dans des outils d'analyse (pandas, gnuplot).
 |--------|--------|-----------|---------|
 | Drivers (init, erreurs, réinit) | INFO / WARN / ERROR | À chaque occurrence | Message texte |
 | Machine à états vol | INFO | À chaque transition | États source et cible |
-| Machine à états sécurité | WARN / ERROR | À chaque transition | États + cause |
-| Navigation (attitude, position, vitesse) | INFO | **10 Hz** | Champs structurés |
-| Santé capteurs (compteurs erreurs) | INFO | **1 Hz** | Compteurs |
-| GPS (fix, satellites, précision) | INFO / WARN | À chaque changement + 1 Hz | Champs structurés |
+| Machine à états sécurité | INFO / WARN / ERROR | À chaque changement d'état ou de cause | États + cause |
+| Échantillon de vol (état, mode, gaz, RC, consignes, attitude, position, vitesse, altitude) | INFO | **10 Hz** de `Armement` à `Desarmement`, **1 Hz** sinon, et à chaque changement d'état vol | `clé=valeur` |
+| Santé capteurs, détail GPS (compteurs, satellites, précision) | INFO | Non implémenté : seuls les changements sont journalisés, l'état sécurité figure dans l'échantillon | Message texte |
 | Calibration (chargement, expiration) | INFO / WARN | À chaque occurrence | Message texte |
 | Armement / désarmement | INFO | À chaque occurrence | Message texte |
 | DEBUG drivers (registres, valeurs) | DEBUG | Désactivé en vol | Message texte |
@@ -106,7 +107,7 @@ Les données IMU brutes (200 Hz) **ne sont jamais journalisées** — l'état es
 
 ```
 [10:15:32] INFO   mission  AttenteArmement → Armement
-[10:15:33] INFO   nav      r=+0.3° t=-1.2° l=+45.6°  alt=+150.3m  v=12.3m/s
+[10:15:33] INFO   nav      etat=RoulageAuSol mode=Autopilote arme=true gaz_applique=1100 …
 [10:15:34] WARN   gps      Fix perdu — 4 sats < seuil 6
 [10:15:34] ERROR  baro     Erreur I²C — réinit #3
 ```
@@ -118,7 +119,7 @@ Les données IMU brutes (200 Hz) **ne sont jamais journalisées** — l'état es
 |--------|-----------|---------------|
 | WARN et ERROR (tous) | À chaque occurrence | Toujours visible immédiatement |
 | Transitions MAÉ vol et sécurité | À chaque occurrence | Suivi de l'état système |
-| Résumé navigation (attitude + altitude + vitesse) | **1 Hz** | Lisible par un humain |
+| Échantillon de vol (cible `nav`) | **1 Hz** | Suivi de la mission avec `tail -f` |
 | Santé capteurs | Sur dégradation uniquement | Pas de bruit en nominal |
 | DEBUG | Jamais | Réservé à la boîte noire si activé |
 
